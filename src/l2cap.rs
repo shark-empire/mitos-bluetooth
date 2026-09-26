@@ -85,7 +85,7 @@ impl L2cap {
             (scid, ident, rx)
         };
         // Connection Request: [psm][scid]
-        let resp = match self.sig_request(handle, 0x02, ident, &psm.to_le_bytes(), &scid.to_le_bytes()).and(rx_recv(rx, ident, self, 10)) {
+        let resp = match self.sig_request(handle, 0x02, ident, &psm.to_le_bytes(), &scid.to_le_bytes()) ...and_then(|_| rx_recv(rx, ident, self, 10))?; {
             Ok(v) => v,
             Err(e) => { let mut st = self.st.lock().unwrap(); st.channels.remove(&scid); st.waiters.remove(&ident); return Err(e); }
         };
@@ -101,7 +101,7 @@ impl L2cap {
         payload.extend_from_slice(&0u16.to_le_bytes());
         payload.extend_from_slice(&[0x01, 0x02]); // MTU option
         payload.extend_from_slice(&672u16.to_le_bytes());
-        let r2 = self.sig_request(handle, 0x04, ident2, &payload).and(rx_recv(rx2, ident2, self, 10));
+        let r2 = self.sig_request(handle, 0x04, ident2, &payload)...and_then(|_| rx_recv(rx, ident, self, 10))?;
         match r2 {
             Ok((0x05, data)) if data.len() >= 4 => {
                 let mut i = 4;
@@ -144,7 +144,7 @@ impl L2cap {
         let (ident, rx) = { let mut st = self.st.lock().unwrap(); let i = st.next_ident; st.next_ident = if st.next_ident == 255 { 1 } else { st.next_ident + 1 }; let (tx, rx) = channel(); st.waiters.insert(i, tx); (i, rx) };
         let mut payload = rcid.to_le_bytes().to_vec();
         payload.extend_from_slice(&cid.to_le_bytes());
-        let _ = self.sig_request(handle, 0x06, ident, &payload).and(rx_recv(rx, ident, self, 5));
+        let _ = self.sig_request(handle, 0x06, ident, &payload)...and_then(|_| rx_recv(rx, ident, self, 10))?;
         let mut st = self.st.lock().unwrap();
         st.channels.remove(&cid);
         if let Some(tx) = st.handlers.remove(&cid) { let _ = tx.send(L2Packet { handle, cid, psm, data: Vec::new(), closed: true }); }
