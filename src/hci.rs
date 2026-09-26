@@ -187,7 +187,9 @@ pub fn open_hci_user_channel(index: u32) -> Result<LinuxHciSocket> {
     unsafe {
         let fd = libc::socket(libc::AF_BLUETOOTH, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 1);
         if fd < 0 { return Err(Error::PermissionDenied(format!("hci socket: {}", std::io::Error::last_os_error()))); }
-        let sa = SockAddrHci { family: libc::AF_BLUETOOTH as u16, dev: index as u16, channel: 2 /* HCI_CHANNEL_USER */ };
+        // in open_hci_user_channel():
+let sa = SockAddrHci { family: libc::AF_BLUETOOTH as u16, dev: index as u16,
+                       channel: 1 /* HCI_CHANNEL_USER — 2 is the read-only monitor channel */ };
         if libc::bind(fd, &sa as *const _ as *const libc::sockaddr, std::mem::size_of::<SockAddrHci>() as u32) < 0 {
             let e = std::io::Error::last_os_error();
             libc::close(fd);
