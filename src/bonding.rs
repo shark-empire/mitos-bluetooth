@@ -75,6 +75,14 @@ impl BondStore {
         let mut b = self.bonds.lock().unwrap();
         if let Some(e) = b.get_mut(id) { e.last_connected = crate::device::now_ts(); let s: Vec<Bond> = b.values().cloned().collect(); drop(b); self.store.save_bonds(&s); }
     }
+    
     pub fn remove(&self, id: &DeviceId) -> bool {
-        let mut b = self.bonds.lock().unwrap();
-        let
+    let mut b = self.bonds.lock().unwrap();
+    let existed = b.remove(id).is_some();
+    if existed {
+        let snapshot: Vec<Bond> = b.values().cloned().collect();
+        drop(b);
+        self.store.save_bonds(&snapshot);
+    }
+    existed
+}
