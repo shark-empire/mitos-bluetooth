@@ -184,7 +184,7 @@ impl L2cap {
             let code = data[i]; let ident = data[i + 1]; let len = le16(data, i + 2) as usize;
             let payload = data.get(i + 4..i + 4 + len).unwrap_or(&[]);
             if code == 0x12 { // Connection Parameter Update Request -> accept
-                let mut p = vec![0x13, ident, 0x02, 0x00];
+                let mut p = vec![0x01, ident, 0x02, 0x00, 0x00, 0x00];
                 p.extend_from_slice(&0u16.to_le_bytes());
                 let _ = self.send_fixed(handle, CID_LE_SIGNALING, &p);
             }
