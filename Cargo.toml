@@ -1,0 +1,21 @@
+[package]
+name = "mitos-bluetooth"
+version = "0.1.0"
+edition = "2021"
+description = "Bluetooth daemon for Mito OS: HCI -> L2CAP -> profiles, with a JSON IPC API"
+
+[lib]
+name = "mitos_bluetooth"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mitos-bluetooth"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+lto = true
