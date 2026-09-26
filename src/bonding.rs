@@ -76,13 +76,34 @@ impl BondStore {
         if let Some(e) = b.get_mut(id) { e.last_connected = crate::device::now_ts(); let s: Vec<Bond> = b.values().cloned().collect(); drop(b); self.store.save_bonds(&s); }
     }
     
-    pub fn remove(&self, id: &DeviceId) -> bool {
-    let mut b = self.bonds.lock().unwrap();
-    let existed = b.remove(id).is_some();
-    if existed {
+        pub fn remove(&self, id: &DeviceId) -> bool {
+        let mut b = self.bonds.lock().unwrap();
+        let existed = b.remove(id).is_some();
+        if existed {
+            let snapshot: Vec<Bond> = b.values().cloned().collect();
+            drop(b);
+            self.store.save_bonds(&snapshot);
+        }
+        existed
+    }
+    pub fn set_name(&self, id: &DeviceId, name: &str) {
+        let mut b = self.bonds.lock().unwrap();
+        if let Some(e) = b.get_mut(id) { e.name = Some(name.to_string()); }
         let snapshot: Vec<Bond> = b.values().cloned().collect();
         drop(b);
         self.store.save_bonds(&snapshot);
     }
-    existed
-}
+    pub fn set_class(&self, id: &DeviceId, class: u32) {
+        let mut b = self.bonds.lock().unwrap();
+        if let Some(e) = b.get_mut(id) { e.class = class; }
+        let snapshot: Vec<Bond> = b.values().cloned().collect();
+        drop(b);
+        self.store.save_bonds(&snapshot);
+    }
+    pub fn update_profiles(&self, id: &DeviceId, kind: ProfileKind) {
+        let mut b = self.bonds.lock().unwrap();
+        if let Some(e) = b.get_mut(id) { if !e.profiles.contains(&kind) { e.profiles.push(kind); } }
+        let snapshot: Vec<Bond> = b.values().cloned().collect();
+        drop(b);
+        self.store.save_bonds(&snapshot);
+    }
