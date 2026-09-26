@@ -117,40 +117,43 @@ impl SdpClient {
     }
 
     fn parse_attrs(&self, raw: &[u8]) -> Result<SdpService> {
-        let mut svc = SdpService::default();
-        let mut i = 0;
-        while i < raw.len() {
-            let id = match parse_de(raw, &mut i)? { De::U(v) => v as u16, _ => break };
-            let val = parse_de(raw, &mut i)?;
+    let mut svc = SdpService::default();
+    let mut i = 0;
+    // attributeLists = SEQ of attributeList; each attributeList = SEQ of (id, value) pairs
+    let outer = parse_de(raw, &mut i)?;
+    let De::Seq(lists) = outer else { return Err(Error::Sdp("attributeLists is not a sequence".into())) };
+    for list in &lists {
+        let De::Seq(pairs) = list else { continue };
+        let mut k = 0;
+        while k + 1 < pairs.len() {
+            let id = match &pairs[k] { De::U(v) => *v as u16, _ => { k += 1; continue } };
+            let val = &pairs[k + 1];
+            k += 2;
             match id {
-                0x0001 => { // ServiceClassIDList
-                    if let De::Seq(items) = val {
-                        for it in items { if let De::Uuid(u) = it { svc.service_classes.push(u as u16); } }
-                    }
-                }
-                0x0004 => { // ProtocolDescriptorList
+                0x0001 => { if let De::Seq(items) = val { for it in items { if let De::Uuid(u) = it { svc.service_classes.push(u as u16); } } } }
+                0x0004 => {
                     if let De::Seq(layers) = val {
                         for layer in layers {
                             let De::Seq(parts) = layer else { continue };
                             let mut it = parts.iter();
-                            let uuid = match it.next() { Some(De::Uuid(u)) => u as u16, _ => continue };
+                            let uuid = match it.next() { Some(De::Uuid(u)) => *u as u16, _ => continue };
                             match uuid {
-                                0x0100 => { if let Some(De::U(p)) = it.next() { if svc.psm.is_none() { svc.psm = Some(p as u16); } } } // L2CAP
-                                0x0003 => { if let Some(De::U(c)) = it.next() { if svc.rfcomm_channel.is_none() { svc.rfcomm_channel = Some(c as u8); } } } // RFCOMM
+                                0x0100 => { if let Some(De::U(p)) = it.next() { if svc.psm.is_none() { svc.psm = Some(p as u16); } } }
+                                0x0003 => { if let Some(De::U(c)) = it.next() { if svc.rfcomm_channel.is_none() { svc.rfcomm_channel = Some(c as u8); } } }
                                 _ => {}
                             }
                         }
                     }
                 }
-                0x0009 => { // ProfileDescriptorList: [[uuid, version]]
+                0x0009 => {
                     if let De::Seq(items) = val {
                         if let Some(De::Seq(pair)) = items.first() {
                             if pair.len() == 2 { if let (De::Uuid(_), De::U(v)) = (&pair[0], &pair[1]) { svc.version = Some(*v as u16); } }
                         }
                     }
                 }
-                0x0100 => { if let De::Str(s) = val { svc.name = Some(String::from_utf8_lossy(&s).to_string()); } }
-                0x0206 => { // HIDDescriptorList: [[type(0x22), data]]
+                0x0100 => { if let De::Str(s) = val { svc.name = Some(String::from_utf8_lossy(s).to_string()); } }
+                0x0206 => {
                     if let De::Seq(items) = val {
                         for item in items {
                             if let De::Seq(pair) = item {
@@ -166,8 +169,9 @@ impl SdpClient {
                 _ => {}
             }
         }
-        Ok(svc)
     }
+    Ok(svc)
+}
 }
 
 impl Drop for SdpClient {
