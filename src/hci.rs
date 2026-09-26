@@ -263,9 +263,11 @@ impl HciTransport for SerialH4 {
         Ok(total)
     }
     fn try_clone(&self) -> Result<Box<dyn HciTransport>> {
-        // Not generally cloneable; serial transports are single-owner.
-        Err(Error::NotSupported("serial h4 clone".into()))
-    }
+    // Re-open the same device: the reader thread owns one fd, the writer another.
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(&self.label)?;
+    let w = f.try_clone()?;
+    Ok(Box::new(SerialH4 { port: Box::new(f), writer: Box::new(w), buf: Vec::new(), label: self.label.clone() }))
+      }
     fn name(&self) -> String { self.label.clone() }
 }
 
