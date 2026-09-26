@@ -248,7 +248,7 @@ impl Smp {
     }
 
     /// Begin legacy pairing (we are master/initiator).
-    pub fn start_pairing(self: &Arc<Self>, handle: u16, mitm: bool) -> Result<()> {
+    pub fn start_pairing(&self, handle: u16, mitm: bool) -> Result<()> {
         let dev = { self.st.lock().unwrap().get(&handle).map(|c| c.device).ok_or_else(|| Error::InvalidState("smp not attached".into()))? };
         let preq: [u8; 7] = [0x04 /* KeyboardDisplay */, 0x00 /* OOB */, if mitm { 0x05 } else { 0x01 } /* authreq: bonding(+MITM) */, 16, 0x00, 0x01 /* we give nothing... */, 0x01 /* responder gives LTK */];
         {
@@ -269,16 +269,16 @@ impl Smp {
             0x04 => self.on_random(handle, data),
             0x05 => self.on_failed(handle, data),
             0x06 | 0x07 | 0x08 | 0x09 | 0x0a => self.on_key(handle, code, data),
-            0x0b => { // Security Request from peripheral: re-encrypt with bond if we have one
-                if let Some(dev) = self.st.lock().unwrap().get(&handle).map(|c| c.device) {
-                    if self.bonds.get(&dev).and_then(|b| b.le_ltk).is_some() {
-                        let s = self.st.clone();
-                        let h = handle;
-                        let hci = self.hci.clone();
-                        std::thread::spawn(move || { let _ = Smp { l2: s_l2_dummy(), hci, bus: s_bus_dummy(), bonds: s_bonds_dummy(), st: s }.encrypt_bond(h); });
-                    }
-                }
-            }
+            0x0b => { // LE Security Request from the peripheral: encrypt with stored LTK, or pair
+          blet dev = self.st.lock().unwrap().get(&handle).map(|c| c.device);
+         if let Some(dev) = dev {
+        if self.bonds.get(&dev).and_then(|b| b.le_ltk).is_some() {
+            let _ = self.encrypt_bond(handle);
+        } else if !self.busy(handle) {
+            let _ = self.start_pairing(handle, true);
+        }
+    }
+}
             _ => {}
         }
     }
@@ -418,7 +418,7 @@ impl Smp {
     }
 
     /// GUI supplied a passkey for a pending PasskeyEntry pairing.
-    pub fn provide_passkey(self: &Arc<Self>, device: &DeviceId, passkey: u32) -> Result<()> {
+    pub fn provide_passkey(&self, device: &DeviceId, passkey: u32) -> Result<()> {
         let mut found = None;
         {
             let st = self.st.lock().unwrap();
@@ -455,7 +455,7 @@ impl Smp {
 }
 
 use crate::l2cap::L2Packet;
-use std::sync::mpsc::channel as _ch;
+use std::sync::mpsc::channel;
 
 fn rand16() -> [u8; 16] {
     let mut b = [0u8; 16];
@@ -465,7 +465,3 @@ fn rand16() -> [u8; 16] {
 }
 fn rand_u32() -> u32 { u32::from_le_bytes(rand16()[..4].try_into().unwrap()) }
 
-// helpers used by the (unused) legacy SmpManager stub above
-fn s_l2_dummy() -> Arc<L2cap> { unreachable!() }
-fn s_bus_dummy() -> Arc<EventBus> { unreachable!() }
-fn s_bonds_dummy() -> Arc<BondStore> { unreachable!() }
