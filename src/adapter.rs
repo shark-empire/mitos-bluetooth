@@ -55,7 +55,7 @@ impl BluetoothAdapter {
         };
         let le = {
             let r = self.hci.command(op::READ_LOCAL_SUPPORTED_FEATURES, &[])?;
-            r.len() >= 12 && r[7] & 0x02 != 0 // LMP feature bit 25 = LE supported (byte 3 of features)
+            r.len() >= 5 && r[4] & 0x02 != 0 // LMP feature bit 25 = LE supported (byte 3 of features)
         };
         let _ = self.hci.command(op::READ_BUFFER_SIZE, &[]);
         self.hci.command(op::WRITE_PAGE_TIMEOUT, &0x2000u16.to_le_bytes())?;
