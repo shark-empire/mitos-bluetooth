@@ -253,7 +253,7 @@ impl L2cap {
                     // command reject for anything we don't handle
                     let mut resp = vec![ident, 0x01, 0x02, 0x00];
                     resp.extend_from_slice(&0u16.to_le_bytes());
-                    let mut p = vec![0x01];
+                    let p = vec![0x01, ident, 0x02, 0x00, 0x00, 0x00];
                     p.extend_from_slice(&resp);
                     let _ = self.send_fixed(handle, CID_SIGNALING, &p);
                 }
