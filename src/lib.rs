@@ -1,0 +1,21 @@
+#![allow(dead_code)]
+pub mod error;
+pub mod device;
+pub mod events;
+pub mod hci;
+pub mod l2cap;
+pub mod sdp;
+pub mod rfcomm;
+pub mod smp;
+pub mod adapter;
+pub mod discovery;
+pub mod pairing;
+pub mod bonding;
+pub mod storage;
+pub mod connection;
+pub mod profile;
+pub mod gatt;
+pub mod hid;
+pub mod audio;
+pub mod bluetooth;
+pub mod ipc;
