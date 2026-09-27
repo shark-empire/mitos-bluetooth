@@ -44,6 +44,15 @@ impl AdapterRuntime {
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
         Self::build(index, adapter.hci.clone(), info, bus, bonds)
     }
+    /// Open an adapter with an explicit transport — used by tests, serial, and a
+    /// future mitos-kernel driver (implement `HciTransport`, pass it here).
+    pub fn open_with(index: u32, transport: Box<dyn crate::hci::HciTransport>,
+                     cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
+        let hci = Arc::new(crate::hci::HciClient::open(index, transport)?);
+        let adapter = BluetoothAdapter { hci: hci.clone() };
+        let info = adapter.init(&cfg.name, cfg.discoverable)?;
+        Self::build(index, hci, info, bus, bonds)
+    }
 
     pub fn open_serial(index: u32, path: &str, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
         let tr = SerialH4::open(path)?;
@@ -137,6 +146,7 @@ pub struct BluetoothManager {
     pub cfg: Mutex<Config>,
     pub adapters: Mutex<HashMap<u32, Arc<AdapterRuntime>>>,
     state: Mutex<BluetoothState>,
+    pub pair_timeout: Duration,
 }
 
 impl BluetoothManager {
@@ -145,8 +155,24 @@ impl BluetoothManager {
         let cfg = store.load_config();
         let bonds = Arc::new(BondStore::new(store.clone()));
         Ok(Arc::new(BluetoothManager { bus: EventBus::new(), store, bonds, cfg: Mutex::new(cfg),
-                                       adapters: Mutex::new(HashMap::new()), state: Mutex::new(BluetoothState::Off) }))
+                                       adapters: Mutex::new(HashMap::new()), Duration::from_secs(120), state: Mutex::new(BluetoothState::Off) }))
     }
+    /// Bring an adapter up with an injected transport (tests / custom kernels).
+    pub fn power_on_with(&self, index: u32, transport: Box<dyn crate::hci::HciTransport>) -> Result<AdapterInfo> {
+        if let Some(rt) = self.adapters.lock().unwrap().get(&index) { return Ok(rt.info.lock().unwrap().clone()); }
+        let cfg = self.cfg.lock().unwrap().clone();
+        let rt = AdapterRuntime::open_with(index, transport, &cfg, self.bus.clone(), self.bonds.clone())?;
+        let info = rt.info.lock().unwrap().clone();
+        let address = info.address;
+        self.adapters.lock().unwrap().insert(index, rt);
+        if *self.state.lock().unwrap() != BluetoothState::On {
+            *self.state.lock().unwrap() = BluetoothState::On;
+            self.publish_state();
+        }
+        self.bus.publish(Event::AdapterAdded { index, address: address.to_string() });
+        Ok(info)
+    }
+    
 
     fn publish_state(&self) {
         let s = self.state.lock().unwrap().clone();
@@ -298,7 +324,7 @@ impl BluetoothManager {
         } else if !rt.smp.busy(handle) {
             rt.smp.start_pairing(handle, true)?;
         }
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + self.pair_timeout;
         loop {
             let remain = deadline.saturating_duration_since(Instant::now());
             if remain.is_zero() { break; }
