@@ -53,6 +53,7 @@ fn handle_client(stream: UnixStream, mgr: Arc<BluetoothManager>, bus: Arc<EventB
         Ok(s) => Arc::new(Mutex::new(s)),
         Err(e) => { eprintln!("[ipc] clone stream: {e}"); return; }
     };
+    let privileged = peer_is_privileged(&stream);
     let alive = Arc::new(AtomicBool::new(true));
     let mut reader = std::io::BufReader::new(stream);
     let mut line = String::new();
@@ -77,7 +78,7 @@ fn handle_client(stream: UnixStream, mgr: Arc<BluetoothManager>, bus: Arc<EventB
             write_line(&out, &json!({"id": id, "ok": true, "result": "subscribed"}));
             continue;
         }
-        let resp = match dispatch(&mgr, &method, &params) {
+        let resp = match dispatch(&mgr, &method, &params, privileged) {
             Ok(v) => json!({"id": id, "ok": true, "result": v}),
             Err(e) => json!({"id": id, "ok": false, "error": e.to_string()}),
         };
@@ -114,10 +115,10 @@ fn write_line(out: &Arc<Mutex<UnixStream>>, v: &Value) {
 }
 
 fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value, privileged: bool) -> Result<Value> {
-    Ok(match method {
-            if !privileged && matches!(method, "power_on" | "power_off" | "pair" | "remove_device") {
+    if !privileged && matches!(method, "power_on" | "power_off" | "pair" | "remove_device") {
         return Err(Error::PermissionDenied(format!("method '{method}' requires local privileges")));
-          }
+    }
+    Ok(match method {
         "ping" => json!("pong"),
         "get_state" => serde_json::to_value(mgr.state())?,
         "get_adapters" => serde_json::to_value(mgr.adapters())?,

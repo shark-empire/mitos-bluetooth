@@ -234,7 +234,8 @@ impl AudioManager {
 
     pub fn connect_a2dp(self: &Arc<Self>, device: &DeviceId, handle: u16) -> Result<()> {
         let sig_cid = self.l2.connect(handle, PSM_AVDTP)?;
-        let sig = spawn_sig_actor(self.l2.clone(), sig_cid);
+        let delay_ms = Arc::new(Mutex::new(None));
+        let sig = spawn_sig_actor(self.l2.clone(), sig_cid, delay_ms.clone());
         // 1. find a free audio sink endpoint
         let seps = avdtp_cmd(&sig, avdtp::DISCOVER, &[])?;
         let mut seid = None;
@@ -269,6 +270,7 @@ impl AudioManager {
         s.a2dp = Some(A2dpSession {
             sig, sig_cid, media_cid, seid, cfg,
             started: false, seq: 0, ts: 0, ssrc: u32::from_le_bytes(ssrc),
+            delay_ms, sock: None, socket_path: None,
         });
         self.bus.publish(Event::A2dpStateChanged { id: *device, state: "open".into() });
         Ok(())
