@@ -57,6 +57,23 @@ impl ConnectionManager {
     pub fn handle_of(&self, id: &DeviceId) -> Option<u16> {
         self.conns.lock().unwrap().get(id).filter(|c| c.state == ConnectionState::Connected).map(|c| c.handle)
     }
+    
+    /// Enable link encryption if we hold a link key for this device.
+    fn ensure_encrypted(&self, handle: u16, wait: bool) {
+        let id = self.by_handle.lock().unwrap().get(&handle).copied();
+        let has_key = id.and_then(|id| self.bonds.get(&id)).map(|b| b.link_key.is_some()).unwrap_or(false);
+        if !has_key { return; }
+        let mut p = handle.to_le_bytes().to_vec();
+        p.push(0x01);
+        if let Err(e) = self.hci.command_status(op::SET_CONNECTION_ENCRYPTION, &p) {
+            eprintln!("[bt] encryption command failed: {e}");
+            return;
+        }
+        if wait {
+            let _ = self.hci.wait_event(move |e| e.code == ev::ENCRYPTION_CHANGE && e.u16(1) == handle,
+                                          Duration::from_secs(3));
+        }
+    }
 
     /// Establish (or reuse) an ACL link. Returns the connection handle.
     pub fn connect_acl(&self, id: &DeviceId, timeout: Duration) -> Result<u16> {
@@ -150,6 +167,7 @@ impl ConnectionManager {
     pub fn connect_profile(&self, id: &DeviceId, kind: ProfileKind) -> Result<()> {
         let handle = self.connect_acl(id, Duration::from_secs(15))?;
         let le = id.address_type != AddressType::Bredr;
+        if !le { self.ensure_encrypted(handle, true); } 
         self.profiles.connect(id, handle, le, kind)?;
         {
             let mut c = self.conns.lock().unwrap();
@@ -275,6 +293,7 @@ impl ConnectionManager {
         if self.by_handle.lock().unwrap().contains_key(&handle) { return; }
         let id = DeviceId { address: addr, address_type: addr_type };
         self.register(handle, id, le);
+        if !le { self.ensure_encrypted(handle, false); }    // <-- new (device-initiated reconnect)
         let d = self.devices.lock().unwrap().get(&id).cloned();
         if let Some(d) = d { self.bus.publish(Event::DeviceUpdated { device: d }); }
     }
