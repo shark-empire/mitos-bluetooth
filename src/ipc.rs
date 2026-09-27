@@ -96,14 +96,28 @@ fn pump_events(rx: Receiver<Event>, out: Arc<Mutex<UnixStream>>, alive: Arc<Atom
     }
 }
 
+fn peer_is_privileged(stream: &UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as u32;
+    let ok = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+                         &mut cred as *mut _ as *mut libc::c_void, &mut len) == 0
+    };
+    ok && cred.uid == unsafe { libc::geteuid() }
+}
+
 fn write_line(out: &Arc<Mutex<UnixStream>>, v: &Value) {
     let mut s = out.lock().unwrap();
     let _ = writeln!(s, "{}", serde_json::to_string(v).unwrap_or_default());
     let _ = s.flush();
 }
 
-fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value) -> Result<Value> {
+fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value, privileged: bool) -> Result<Value> {
     Ok(match method {
+            if !privileged && matches!(method, "power_on" | "power_off" | "pair" | "remove_device") {
+        return Err(Error::PermissionDenied(format!("method '{method}' requires local privileges")));
+          }
         "ping" => json!("pong"),
         "get_state" => serde_json::to_value(mgr.state())?,
         "get_adapters" => serde_json::to_value(mgr.adapters())?,
