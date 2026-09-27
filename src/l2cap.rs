@@ -19,7 +19,7 @@ pub const CID_SMP: u16 = 0x0006;
 
 pub struct L2Packet { pub handle: u16, pub cid: u16, pub psm: u16, pub data: Vec<u8>, pub closed: bool }
 
-struct Channel { handle: u16, remote_cid: u16, psm: u16 }
+struct Channel { handle: u16, remote_cid: u16, psm: u16, mtu: u16}
 struct L2State {
     next_cid: u16,
     next_ident: u8,
@@ -70,7 +70,7 @@ impl L2cap {
         st.devices.remove(&handle);
     }
 
-    pub fn connect(&self, handle: u16, psm: u16) -> Result<u16> {
+    pub fn connect(&self, handle: u16, psm: u16, mtu: 672,) -> Result<u16> {
         let (scid, ident, rx) = {
             let mut st = self.st.lock().unwrap();
             let scid = st.next_cid;
@@ -192,7 +192,7 @@ impl L2cap {
         }
     }
 
-    fn on_signaling(&self, handle: u16, data: &[u8]) {
+    fn on_signaling(&self, handle: u16, mtu: 672, data: &[u8]) {
         let mut i = 0;
         while i + 4 <= data.len() {
             let code = data[i]; let ident = data[i + 1]; let len = le16(data, i + 2) as usize;
@@ -230,14 +230,28 @@ impl L2cap {
                         }
                     }
                 }
-                0x04 => { // inbound Configure Request: [dcid(ours)][flags][opts] -> answer OK
+                
+                0x04 => { // inbound Configure Request: [dcid(ours)][flags][opts]
                     if payload.len() >= 4 {
+                        let ours = le16(&payload, 0);
+                        // learn the peer's receive MTU (option type 0x01) — needed for A2DP
+                        let mut i = 4;
+                        while i + 2 <= payload.len() {
+                            let t = payload[i]; let l = payload[i + 1] as usize;
+                            if t == 0x01 && i + 4 <= payload.len() {
+                                let m = le16(&payload, i + 2);
+                                let mut st = self.st.lock().unwrap();
+                                if let Some(c) = st.channels.get_mut(&ours) { c.mtu = m.max(48); }
+                            }
+                            i += 2 + l;
+                        }
                         let mut resp = payload[..2].to_vec();
                         resp.extend_from_slice(&0u16.to_le_bytes());
-                        resp.extend_from_slice(&[0x04, 0x02, 0x00, 0x00]); // result option: success
+                        resp.extend_from_slice(&[0x04, 0x02, 0x00, 0x00]); // result: success
                         let _ = self.sig_request(handle, 0x05, ident, &resp);
                     }
                 }
+                
                 0x06 => { // inbound Disconnect Request: [dcid(ours)][scid(theirs)]
                     if payload.len() >= 4 {
                         let ours = le16(&payload, 0); let theirs = le16(&payload, 2);
@@ -267,6 +281,11 @@ impl L2cap {
 impl L2cap {
     fn drop_waiter(&self, ident: u8) { self.st.lock().unwrap().waiters.remove(&ident); }
 }
+
+    /// Peer's receive MTU for a channel (the max SDU we may send it).
+    pub fn remote_mtu(&self, cid: u16) -> u16 {
+        self.st.lock().unwrap().channels.get(&cid).map(|c| c.mtu).unwrap_or(48)
+    }
 
 fn rx_recv(rx: Receiver<(u8, Vec<u8>)>, ident: u8, l2: &L2cap, secs: u64) -> Result<(u8, Vec<u8>)> {
     match rx.recv_timeout(Duration::from_secs(secs)) {
