@@ -12,6 +12,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const UUID_HFP_HF: u16 = 0x111e; // headset advertising the Handsfree role
 const UUID_HSP_HS: u16 = 0x1108; // headset advertising the Headset role
@@ -85,6 +86,8 @@ pub struct A2dpInfo {
     pub config: SbcConfig,
     pub mtu: u16,
     pub max_packet_payload: u16, // mtu - RTP overhead: the encoder's budget per media packet
+    pub delay_ms: Option<u32>,
+    pub socket_path: Option<String>,
 }
 
 // ===================== sessions =====================
@@ -106,6 +109,9 @@ pub struct A2dpSession {
     pub seq: u16,
     pub ts: u32,
     pub ssrc: u32,
+    pub delay_ms: Arc<Mutex<Option<u32>>>,   // sink-reported render delay (AVDTP Delay Report)
+    pub sock: Option<Arc<BinSock>>,          // per-speaker media socket (created on start)
+    pub socket_path: Option<String>,
 }
 pub struct AvrcpSession { pub cid: u16, pub ctl: Sender<AvrMsg> }
 pub struct HfpSession { pub cid: u16, pub is_hsp: bool, pub volume: u8, pub mic_volume: u8 }
@@ -113,35 +119,49 @@ pub struct HfpSession { pub cid: u16, pub is_hsp: bool, pub volume: u8, pub mic_
 // ===================== small binary-socket helper =====================
 // Protocol: [2-byte BE length][payload], both directions. Used by the A2DP and SCO bridges.
 
-struct BinSock { clients: Mutex<Vec<UnixStream>> }
+struct BinSock {
+    clients: Mutex<Vec<UnixStream>>,
+    running: AtomicBool,
+    path: String,
+}
 
 impl BinSock {
     fn start(path: String, on_rx: Arc<dyn Fn(&[u8]) + Send + Sync>) -> Arc<Self> {
-        let sock = Arc::new(BinSock { clients: Mutex::new(Vec::new()) });
+        let sock = Arc::new(BinSock { clients: Mutex::new(Vec::new()),
+                                      running: AtomicBool::new(true), path: path.clone() });
         let s = sock.clone();
         std::thread::spawn(move || {
             let _ = std::fs::remove_file(&path);
-            if let Ok(listener) = UnixListener::bind(&path) {
-                println!("[audio] serving {path}");
-                for c in listener.incoming().flatten() {
-                    if let Ok(bc) = c.try_clone() { s.clients.lock().unwrap().push(bc); }
-                    let on = on_rx.clone();
-                    std::thread::spawn(move || {
-                        let mut c = c;
-                        loop {
-                            let mut len = [0u8; 2];
-                            if c.read_exact(&mut len).is_err() { break; }
-                            let n = u16::from_be_bytes(len) as usize;
-                            let mut buf = vec![0u8; n];
-                            if n > 0 && c.read_exact(&mut buf).is_err() { break; }
-                            on(&buf);
+            if let Ok(listener) = UnixListener::bind(&s.path) {
+                let _ = listener.set_nonblocking(true);
+                println!("[audio] serving {}", s.path);
+                while s.running.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((c, _)) => {
+                            if let Ok(bc) = c.try_clone() { s.clients.lock().unwrap().push(bc); }
+                            let on = on_rx.clone();
+                            std::thread::spawn(move || {
+                                let mut c = c;
+                                loop {
+                                    let mut len = [0u8; 2];
+                                    if c.read_exact(&mut len).is_err() { break; }
+                                    let n = u16::from_be_bytes(len) as usize;
+                                    let mut buf = vec![0u8; n];
+                                    if n > 0 && c.read_exact(&mut buf).is_err() { break; }
+                                    on(&buf);
+                                }
+                            });
                         }
-                    });
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(200)),
+                        Err(_) => break,
+                    }
                 }
+                let _ = std::fs::remove_file(&s.path);
             }
         });
         sock
     }
+    fn stop(&self) { self.running.store(false, Ordering::Relaxed); }
     fn broadcast(&self, data: &[u8]) {
         let mut msg = Vec::with_capacity(data.len() + 2);
         msg.extend_from_slice(&(data.len() as u16).to_be_bytes());
@@ -233,8 +253,12 @@ impl AudioManager {
         // 3. configure + open
         let mut p = vec![seid << 2, 1 << 2]; // ACP SEID, our (INT) SEID
         p.extend_from_slice(&[avdtp::CAT_MEDIA_TRANSPORT, 0x00]);
+        if caps_has_category(&caps, 0x0B) {
+            p.extend_from_slice(&[0x0B, 0x00]); // Delay Reporting — mitos-audio's latency input
+        }
         p.extend_from_slice(&[avdtp::CAT_MEDIA_CODEC, 0x05, 0x00]); // audio/SBC
         p.extend_from_slice(&cfg.config_bytes());
+        
         avdtp_cmd(&sig, avdtp::SET_CONFIGURATION, &p)?;
         avdtp_cmd(&sig, avdtp::OPEN, &[seid << 2])?;
         // 4. media transport channel (second L2CAP connection to the same PSM)
@@ -250,22 +274,45 @@ impl AudioManager {
         Ok(())
     }
 
-    pub fn a2dp_start(&self, device: &DeviceId) -> Result<()> {
+      pub fn a2dp_start(&self, device: &DeviceId) -> Result<()> {
         let (sig, seid) = {
             let st = self.st.lock().unwrap();
             let a = st.get(device).and_then(|s| s.a2dp.as_ref()).ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
             (a.sig.clone(), a.seid)
         };
         avdtp_cmd(&sig, avdtp::START, &[seid << 2])?;
+        let socket_path;
         {
             let mut st = self.st.lock().unwrap();
-            if let Some(a) = st.get_mut(device).and_then(|s| s.a2dp.as_mut()) { a.started = true; }
+            let a = st.get_mut(device).and_then(|s| s.a2dp.as_mut())
+                .ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
+            a.started = true;
+            if a.sock.is_none() {
+                // one media socket per speaker — this is the multi-speaker fan-out path
+                let dir = std::env::var("MITOS_A2DP_SOCK_DIR").unwrap_or_else(|_| "/tmp".into());
+                let path = format!("{dir}/mitos-bluetooth-a2dp-{}.sock", device.address.to_string().replace(':', "-"));
+                let l2c = self.l2.clone();
+                let stc = self.st.clone();
+                let dev = *device;
+                let on: Arc<dyn Fn(&[u8]) + Send + Sync> = Arc::new(move |data: &[u8]| {
+                    if data.is_empty() { return; }
+                    let nframes = data[0] as u32;
+                    let frames = &data[1..];
+                    if let Some(a) = stc.lock().unwrap().get_mut(&dev).and_then(|s| s.a2dp.as_mut()) {
+                        let _ = send_media_packet(&l2c, a, frames, nframes);
+                    }
+                });
+                a.sock = Some(BinSock::start(path.clone(), on));
+                a.socket_path = Some(path);
+            }
+            socket_path = a.socket_path.clone();
         }
         self.bus.publish(Event::A2dpStateChanged { id: *device, state: "started".into() });
+        if let Some(p) = socket_path { self.bus.publish(Event::A2dpStreamReady { id: *device, socket_path: p }); }
         Ok(())
     }
 
-    pub fn a2dp_suspend(&self, device: &DeviceId) -> Result<()> {
+        pub fn a2dp_suspend(&self, device: &DeviceId) -> Result<()> {
         let (sig, seid) = {
             let st = self.st.lock().unwrap();
             let a = st.get(device).and_then(|s| s.a2dp.as_ref()).ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
@@ -274,18 +321,27 @@ impl AudioManager {
         avdtp_cmd(&sig, avdtp::SUSPEND, &[seid << 2])?;
         {
             let mut st = self.st.lock().unwrap();
-            if let Some(a) = st.get_mut(device).and_then(|s| s.a2dp.as_mut()) { a.started = false; }
+            if let Some(a) = st.get_mut(device).and_then(|s| s.a2dp.as_mut()) {
+                a.started = false;
+                if let Some(sock) = a.sock.take() { sock.stop(); }
+                a.socket_path = None;
+            }
         }
         self.bus.publish(Event::A2dpStateChanged { id: *device, state: "suspended".into() });
         Ok(())
     }
 
     /// Negotiated state — the encoder must match `config` and stay within `max_packet_payload`.
-    pub fn a2dp_info(&self, device: &DeviceId) -> Option<A2dpInfo> {
+        pub fn a2dp_info(&self, device: &DeviceId) -> Option<A2dpInfo> {
         let st = self.st.lock().unwrap();
         let a = st.get(device)?.a2dp.as_ref()?;
         let mtu = self.l2.remote_mtu(a.media_cid);
-        Some(A2dpInfo { started: a.started, config: a.cfg, mtu, max_packet_payload: mtu.saturating_sub(13 + PREPEND_MEDIA_HEADER as u16) })
+        Some(A2dpInfo {
+            started: a.started, config: a.cfg, mtu,
+            max_packet_payload: mtu.saturating_sub(13 + PREPEND_MEDIA_HEADER as u16),
+            delay_ms: *a.delay_ms.lock().unwrap(),
+            socket_path: a.socket_path.clone(),
+        })
     }
 
     /// Send pre-encoded SBC frames (one RTP packet's worth). `nframes` advances RTP timestamps.
@@ -433,7 +489,8 @@ impl AudioManager {
     pub fn disconnect(&self, device: &DeviceId) -> Result<()> {
         let session = self.st.lock().unwrap().remove(device);
         if let Some(mut s) = session {
-            if let Some(a) = s.a2dp.take() {
+            if let Some(mut a) = s.a2dp.take() {
+                if let Some(sock) = a.sock.take() { sock.stop(); }
                 let _ = avdtp_cmd(&a.sig, avdtp::CLOSE, &[a.seid << 2]);
                 let _ = self.l2.disconnect(a.media_cid);
                 let _ = self.l2.disconnect(a.sig_cid);
@@ -456,7 +513,7 @@ struct SigCmd { signal: u8, payload: Vec<u8>, reply: Sender<Result<Vec<u8>>> }
 enum SigMsg { Cmd(SigCmd), Pkt(L2Packet) }
 
 /// Sequential AVDTP signaling actor per session: matches responses by transaction label.
-fn spawn_sig_actor(l2: Arc<L2cap>, cid: u16) -> Sender<SigMsg> {
+fn spawn_sig_actor(l2: Arc<L2cap>, cid: u16, delay_ms: Arc<Mutex<Option<u32>>>) -> Sender<SigMsg> {
     let (mux_tx, mux_rx) = channel::<SigMsg>();
     let (ptx, prx) = channel::<L2Packet>();
     l2.register_handler(cid, ptx);
@@ -484,6 +541,19 @@ fn spawn_sig_actor(l2: Arc<L2cap>, cid: u16) -> Sender<SigMsg> {
                             continue;
                         }
                         waiting = Some((wtl, reply));
+                    }
+                    // commands from the sink (message type 0)
+                    if mt == 0 {
+                        let signal = d[1] >> 2;
+                        if signal == 0x0D && d.len() >= 5 {
+                            // DELAYREPORT: [seid<<2][delay u16, tenths of ms]
+                            let tenths = u16::from_be_bytes([d[3], d[4]]);
+                            *delay_ms.lock().unwrap() = Some(tenths as u32 / 10);
+                            let _ = l2.send(cid, &[(t << 4) | 0x02, 0x0D << 2]); // accept
+                        } else {
+                            // unknown sink command -> reject (error 0x01)
+                            let _ = l2.send(cid, &[(t << 4) | 0x03, signal << 2, 0x01]);
+                        }
                     }
                 }
                 SigMsg::Cmd(c) => {
@@ -520,6 +590,18 @@ fn parse_sbc_caps(payload: &[u8]) -> Option<[u8; 4]> {
     }
     None
 }
+
+fn caps_has_category(payload: &[u8], cat: u8) -> bool {
+    let mut i = 0;
+    while i + 2 <= payload.len() {
+        let c = payload[i];
+        let l = payload[i + 1] as usize;
+        if c == cat { return true; }
+        i += 2 + l;
+    }
+    false
+}
+
 
 /// Wrap pre-encoded SBC frames in RTP and send on the media channel.
 fn send_media_packet(l2: &L2cap, a: &mut A2dpSession, frames: &[u8], nframes: u32) -> Result<()> {
@@ -582,9 +664,22 @@ fn spawn_avrcp_actor(l2: Arc<L2cap>, cid: u16, device: DeviceId, bus: Arc<EventB
                     let t = d[0] >> 4;
                     let cr = (d[0] >> 1) & 1;
                     let avc = &d[2..]; // skip profile identifier
-                    if cr == 0 {
-                        // incoming command from the device -> AV/C NOT IMPLEMENTED (0x08)
-                        if avc.len() >= 2 { let _ = send_avctp(t, true, &[0x08, avc[1]]); }
+                                        if cr == 0 {
+                        // incoming command from the device
+                        if avc.len() >= 4 && avc[0] == 0x7C && avc[1] == 0x48 {
+                            // PASSTHROUGH: a button pressed on the speaker
+                            let op = avc[2];
+                            let dlen = avc[3] as usize;
+                            let state = avc.get(4).copied().unwrap_or(0x00);
+                            if dlen == 0 || state == 0x00 { // press (not release)
+                            if let Some(name) = avrcp_op_name(op) {
+                                    bus.publish(Event::MediaCommand { id: device, command: name.to_string() });
+                                }
+                            }
+                            let _ = send_avctp(t, true, &[0x09, 0x48, op, avc[3]]); // ACCEPTED
+                        } else if avc.len() >= 2 {
+                            let _ = send_avctp(t, true, &[0x08, avc[1]]); // NOT IMPLEMENTED
+                        }
                         continue;
                     }
                     let status = avc.first().copied().unwrap_or(0);
@@ -634,6 +729,17 @@ pub fn avrcp_op(name: &str) -> Option<u8> {
         "play" => Some(0x44), "stop" => Some(0x45), "pause" => Some(0x46),
         "next" => Some(0x4B), "prev" => Some(0x4C),
         "volup" => Some(0x41), "voldown" => Some(0x42), "mute" => Some(0x43),
+        _ => None,
+    }
+}
+
+/// Inverse of `avrcp_op`: opcode -> friendly name (used for MediaCommand events).
+pub fn avrcp_op_name(op: u8) -> Option<&'static str> {
+    match op {
+        0x44 => Some("play"), 0x45 => Some("stop"), 0x46 => Some("pause"),
+        0x4B => Some("next"), 0x4C => Some("prev"),
+        0x41 => Some("volup"), 0x42 => Some("voldown"), 0x43 => Some("mute"),
+        0x48 => Some("fastforward"), 0x49 => Some("rewind"),
         _ => None,
     }
 }
