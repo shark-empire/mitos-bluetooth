@@ -591,3 +591,196 @@ fn handle_acl(inner: &Inner, pkt: &[u8]) {
         }
     }
 }
+
+// ---------------- Mock controller (tests, CI, offline development) ----------------
+// Implements enough of HCI to drive the full manager stack without hardware:
+// command completion/status, scripted follow-up events, and a complete SSP
+// pairing chain (link key request -> IO cap -> user confirmation -> notification).
+
+pub struct MockTransport { state: Arc<Mutex<MockState>> }
+
+#[derive(Default)]
+pub struct MockState {
+    outbox: VecDeque<(Instant, Vec<u8>)>, // packets to the host, with a ready-at time
+    sent: Vec<Vec<u8>>,                   // commands received from the host
+    handles: HashMap<u16, [u8; 6]>,
+    next_handle: u16,
+}
+
+impl MockTransport {
+    pub fn new() -> Self {
+        MockTransport { state: Arc::new(Mutex::new(MockState { next_handle: 1, ..Default::default() })) }
+    }
+    /// Shared handle for assertions and event injection from tests.
+    pub fn shared(&self) -> Arc<Mutex<MockState>> { self.state.clone() }
+}
+
+impl MockState {
+    pub fn sent_commands(&self) -> Vec<Vec<u8>> { self.sent.clone() }
+    /// Inject a raw H4 event packet (starts with 0x04) for the host to receive.
+    pub fn inject_event(&mut self, event: Vec<u8>) { self.outbox.push_back((Instant::now(), event)); }
+}
+
+impl HciTransport for MockTransport {
+    fn send_packet(&mut self, packet: &[u8]) -> Result<()> {
+        if packet.first() != Some(&0x01) { return Ok(()); }
+        let opcode = u16::from_le_bytes([packet[1], packet[2]]);
+        let params = &packet[4..];
+        let mut st = self.state.lock().unwrap();
+        st.sent.push(packet.to_vec());
+        mock_on_command(&mut st, opcode, params);
+        Ok(())
+    }
+    fn recv_packet(&mut self, out: &mut Vec<u8>) -> Result<usize> {
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            {
+                let mut st = self.state.lock().unwrap();
+                if let Some((at, _)) = st.outbox.front() {
+                    if *at <= Instant::now() {
+                        let (_, pkt) = st.outbox.pop_front().unwrap();
+                        out.clear();
+                        out.extend_from_slice(&pkt);
+                        return Ok(pkt.len());
+                    }
+                }
+            }
+            if Instant::now() >= deadline { return Err(Error::Timeout("mock recv")); }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    fn try_clone(&self) -> Result<Box<dyn HciTransport>> {
+        Ok(Box::new(MockTransport { state: self.state.clone() }))
+    }
+    fn name(&self) -> String { "mock".into() }
+}
+
+fn mock_cc(opcode: u16, ret: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x04, 0x0E, (3 + ret.len()) as u8, 0x01];
+    v.extend_from_slice(&opcode.to_le_bytes());
+    v.extend_from_slice(ret);
+    v
+}
+fn mock_cs(opcode: u16) -> Vec<u8> {
+    vec![0x04, 0x0F, 0x04, 0x00, 0x01, opcode as u8, (opcode >> 8) as u8]
+}
+fn mock_ev(code: u8, params: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x04, code, params.len() as u8];
+    v.extend_from_slice(params);
+    v
+}
+
+fn mock_on_command(st: &mut MockState, opcode: u16, params: &[u8]) {
+    let addr_param = params.get(0..6).map(<[u8; 6]>::try_from).and_then(Result::ok);
+    let t = |ms: u64| Instant::now() + Duration::from_millis(ms);
+
+    // 1. immediate completion
+    let status_cmds = [
+        op::INQUIRY, op::CREATE_CONNECTION, op::DISCONNECT, op::ACCEPT_CONNECTION_REQUEST,
+        op::REJECT_CONNECTION_REQUEST, op::REMOTE_NAME_REQUEST, op::AUTHENTICATION_REQUESTED,
+        op::SET_CONNECTION_ENCRYPTION, op::LE_CREATE_CONNECTION, op::LE_CREATE_CONNECTION_CANCEL,
+        op::LE_START_ENCRYPTION, op::SETUP_SYNCHRONOUS_CONNECTION, op::ACCEPT_SYNCHRONOUS_CONNECTION,
+        op::REJECT_SYNCHRONOUS_CONNECTION,
+    ];
+    if status_cmds.contains(&opcode) {
+        st.outbox.push_back((t(0), mock_cs(opcode)));
+    } else {
+        let ret: Vec<u8> = match opcode {
+            op::READ_BD_ADDR => { let mut r = vec![0x00]; r.extend_from_slice(&[0x66, 0x55, 0x44, 0x33, 0x22, 0x11]); r }
+            op::READ_LOCAL_VERSION => vec![0x00, 0x0B, 0x00, 0x00, 0x09, 0x0F, 0x00, 0x00, 0x00],
+            op::READ_LOCAL_SUPPORTED_FEATURES => vec![0x00, 0xBF, 0xFF, 0xFE, 0x02, 0x00, 0x00, 0x00, 0x00],
+            op::READ_BUFFER_SIZE => vec![0x00, 0x00, 0x04, 0x30, 0x00, 0x08, 0x00, 0x08, 0x00],
+            op::LE_READ_BUFFER_SIZE => vec![0x00, 0x00, 0x04, 0x08],
+            _ => vec![0x00],
+        };
+        st.outbox.push_back((t(0), mock_cc(opcode, &ret)));
+    }
+
+    // 2. scripted follow-ups
+    match opcode {
+        op::CREATE_CONNECTION | op::ACCEPT_CONNECTION_REQUEST => {
+            if let Some(addr) = addr_param {
+                let handle = st.next_handle; st.next_handle += 1;
+                st.handles.insert(handle, addr);
+                let mut p = vec![0x00]; // status
+                p.extend_from_slice(&handle.to_le_bytes());
+                p.extend_from_slice(&addr);
+                p.push(0x00); // link type: ACL
+                p.push(0x00); // not encrypted
+                st.outbox.push_back((t(50), mock_ev(0x03, &p))); // Connection Complete
+            }
+        }
+        op::DISCONNECT => {
+            if params.len() >= 2 {
+                let handle = u16::from_le_bytes([params[0], params[1]]);
+                st.handles.remove(&handle);
+                let mut p = vec![0x00];
+                p.extend_from_slice(&handle.to_le_bytes());
+                p.push(0x13);
+                st.outbox.push_back((t(50), mock_ev(0x05, &p))); // Disconnection Complete
+            }
+        }
+        op::SET_CONNECTION_ENCRYPTION => {
+            if params.len() >= 2 {
+                let handle = u16::from_le_bytes([params[0], params[1]]);
+                st.outbox.push_back((t(50), mock_ev(0x08, &[0x00, handle as u8, (handle >> 8) as u8, 0x01])));
+            }
+        }
+        op::AUTHENTICATION_REQUESTED => {
+            if params.len() >= 2 {
+                let handle = u16::from_le_bytes([params[0], params[1]]);
+                if let Some(addr) = st.handles.get(&handle).copied() {
+                    st.outbox.push_back((t(20), mock_ev(0x17, &addr))); // Link Key Request
+                }
+            }
+        }
+        op::LINK_KEY_REQUEST_NEG_REPLY => {
+            if let Some(addr) = addr_param {
+                st.outbox.push_back((t(20), mock_ev(0x31, &addr))); // IO Capability Request
+            }
+        }
+        op::IO_CAPABILITY_REQUEST_REPLY => {
+            if let Some(addr) = addr_param {
+                let mut p = addr.to_vec();
+                p.extend_from_slice(&123456u32.to_le_bytes());
+                st.outbox.push_back((t(20), mock_ev(0x33, &p))); // User Confirmation Request
+            }
+        }
+        op::USER_CONFIRMATION_REQUEST_REPLY => {
+            if let Some(addr) = addr_param {
+                let mut sp = vec![0x00]; sp.extend_from_slice(&addr);
+                st.outbox.push_back((t(20), mock_ev(0x36, &sp))); // Simple Pairing Complete
+                let mut lk = addr.to_vec();
+                lk.extend_from_slice(&[0x11u8; 16]); // the "link key"
+                lk.push(0x05);                       // authenticated combination key
+                st.outbox.push_back((t(20), mock_ev(0x18, &lk))); // Link Key Notification
+            }
+        }
+        op::REMOTE_NAME_REQUEST => {
+            if let Some(addr) = addr_param {
+                let mut p = vec![0x00];
+                p.extend_from_slice(&addr);
+                let mut name = b"Mock Keyboard\0".to_vec();
+                name.resize(248, 0);
+                p.extend_from_slice(&name);
+                st.outbox.push_back((t(50), mock_ev(0x07, &p)));
+            }
+        }
+        op::INQUIRY => {
+            let addr = [0x66, 0x55, 0x44, 0x33, 0x22, 0x12];
+            let mut eir = vec![0x0E, 0x09]; // len 14, complete local name
+            eir.extend_from_slice(b"Mock Keyboard");
+            eir.resize(240, 0);
+            let mut p = vec![0x01];
+            p.extend_from_slice(&addr);
+            p.push(0x02); p.push(0x00);
+            p.extend_from_slice(&[0x40, 0x05, 0x00]); // CoD 0x0540 = keyboard
+            p.extend_from_slice(&0u16.to_le_bytes());
+            p.push(0xC4); // RSSI = -60
+            p.extend_from_slice(&eir);
+            st.outbox.push_back((t(80), mock_ev(0x2F, &p))); // Extended Inquiry Result
+            st.outbox.push_back((t(200), mock_ev(0x01, &[0x00]))); // Inquiry Complete
+        }
+        _ => {}
+    }
+}
