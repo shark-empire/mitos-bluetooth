@@ -161,6 +161,24 @@ impl BluetoothManager {
             .ok_or_else(|| Error::NotFound(format!("adapter hci{index} (is Bluetooth powered on?)")))
     }
 
+        // ---- audio ----
+    pub fn a2dp_start(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.a2dp_start(id) }
+    pub fn a2dp_suspend(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.a2dp_suspend(id) }
+    pub fn a2dp_send_sbc(&self, index: u32, id: &DeviceId, frames: &[u8], nframes: u32) -> Result<()> {
+        self.runtime(index)?.audio.a2dp_send_sbc(id, frames, nframes)
+    }
+    pub fn a2dp_state(&self, index: u32, id: &DeviceId) -> Result<crate::audio::A2dpInfo> {
+        self.runtime(index)?.audio.a2dp_info(id).ok_or_else(|| Error::InvalidState("a2dp not connected".into()))
+    }
+    pub fn avrcp_command(&self, index: u32, id: &DeviceId, op: &str) -> Result<()> {
+        let o = crate::audio::avrcp_op(op).ok_or_else(|| Error::InvalidArgument(format!("unknown avrcp op '{op}'")))?;
+        self.runtime(index)?.audio.avrcp_passthrough(id, o)
+    }
+    pub fn set_volume(&self, index: u32, id: &DeviceId, volume: u8) -> Result<()> {
+        self.runtime(index)?.audio.set_absolute_volume(id, volume)
+    }
+    pub fn hfp_connect_sco(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.hfp_connect_sco(id) }
+    pub fn hfp_disconnect_sco(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.hfp_disconnect_sco(id) }
 
     // ---- GATT (LE only for now) ----
     fn conn_handle(&self, index: u32, id: &DeviceId) -> Result<u16> {
