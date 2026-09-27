@@ -288,9 +288,15 @@ impl ConnectionManager {
         if status != 0 { return; } // outgoing failure: surfaced by connect_acl
         if self.by_handle.lock().unwrap().contains_key(&handle) { return; }
         let id = DeviceId { address: addr, address_type: addr_type };
+        let outgoing = self.conns.lock().unwrap().contains_key(&id); 
         self.register(handle, id, le);
         if !le { self.ensure_encrypted(handle, false); }    // <-- new (device-initiated reconnect)
         let d = self.devices.lock().unwrap().get(&id).cloned();
         if let Some(d) = d { self.bus.publish(Event::DeviceUpdated { device: d }); }
-    }
+        if !outgoing {
+            // device-initiated (re)connection, e.g. a paired speaker powering on
+            self.bus.publish(Event::DeviceAclConnected { id });
+        }
+     }
+
 }
