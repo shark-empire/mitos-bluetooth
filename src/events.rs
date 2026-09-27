@@ -49,6 +49,9 @@ pub enum Event {
     AudioVolumeChanged { id: DeviceId, volume: u8 },
     A2dpStateChanged { id: DeviceId, state: String },
     ScoStateChanged { id: DeviceId, connected: bool },
+    DeviceAclConnected { id: DeviceId },
+    MediaCommand { id: DeviceId, command: String },
+    A2dpStreamReady { id: DeviceId, socket_path: String },
 }
 
 #[derive(Clone, Default)]
