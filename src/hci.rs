@@ -90,6 +90,7 @@ pub mod ev {
     pub const LE_CONNECTION_COMPLETE: u8 = 0x01;
     pub const LE_ADVERTISING_REPORT: u8 = 0x02;
     pub const LE_LTK_REQUEST: u8 = 0x05;
+    pub const SYNCHRONOUS_CONNECTION_COMPLETE: u8 = 0x2c;
 }
 
 pub const ACL_PB_START: u16 = 0x1000;
@@ -327,6 +328,16 @@ impl HciClient {
         let i2 = inner.clone();
         let jh = std::thread::Builder::new().name(format!("hci{index}-reader")).spawn(move || reader_loop(reader_tr, i2))?;
         Ok(HciClient { index, inner, cmd_timeout: Duration::from_secs(5), reader: Mutex::new(Some(jh)) })
+    }
+    /// Send a raw SCO data packet (H4 type 3). Payload follows the voice setting
+    /// (0x0060 => 16-bit linear PCM); the controller CVSD-encodes over the air.
+    pub fn send_sco(&self, handle: u16, data: &[u8]) -> Result<()> {
+        let mut pkt = Vec::with_capacity(5 + data.len());
+        pkt.push(0x03);
+        pkt.extend_from_slice(&handle.to_le_bytes());
+        pkt.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        pkt.extend_from_slice(data);
+        self.inner.transport.lock().unwrap().send_packet(&pkt)
     }
 
     pub fn index(&self) -> u32 { self.index }
