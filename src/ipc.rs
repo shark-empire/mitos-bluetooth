@@ -149,6 +149,31 @@ fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value) -> Result<Value> {
         "get_connections" => { let i = p_index(p)?; serde_json::to_value(mgr.connections(i)?)? }
         "set_trusted" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.set_trusted(&id, p_bool(p, "on"))?; json!(true) }
         "remove_device" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.remove_device(i, &id)?; json!(true) }
+                "gatt_services" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; serde_json::to_value(mgr.gatt_services(i, &id)?)? }
+        "gatt_characteristics" => {
+            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let svc = p.get("service").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("service (start handle) required".into()))? as u16;
+            serde_json::to_value(mgr.gatt_characteristics(i, &id, svc)?)?
+        }
+        "gatt_read" => {
+            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let attr = p.get("attribute").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
+            serde_json::to_value(crate::device::to_hex(&mgr.gatt_read(i, &id, attr)?))?
+        }
+        "gatt_write" => {
+            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let attr = p.get("attribute").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
+            let data = crate::device::from_hex(&p_str(p, "data")?)?;
+            mgr.gatt_write(i, &id, attr, &data, p_bool(p, "response"))?;
+            json!(true)
+        }
+        "gatt_subscribe" => {
+            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let attr = p.get("attribute").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
+            let kind = p.get("kind").and_then(|v| v.as_u64()).unwrap_or(1) as u16; // 1 notify, 2 indicate
+            mgr.gatt_subscribe(i, &id, attr, kind)?;
+            json!(true)
+        }
         other => return Err(Error::NotFound(format!("unknown method '{other}'"))),
     })
 }
