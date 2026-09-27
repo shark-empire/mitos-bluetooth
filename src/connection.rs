@@ -261,15 +261,11 @@ impl ConnectionManager {
         let addr = ev.addr(0);
         let class = u32::from_le_bytes([ev.u8(6), ev.u8(7), ev.u8(8), 0]);
         let link_type = ev.u8(9);
-        if link_type != 0 {
-            // SCO/eSCO — audio manager territory (audio batch). Reject politely for now.
+                if link_type != 0 {
+            // SCO/eSCO — the audio manager decides (requires an HFP/HSP session).
+            if self.profiles.accept_sco(&addr) { return; }
             let mut p = addr.0.to_vec();
-            p.push(0x13);
-            p.extend_from_slice(&0u32.to_le_bytes());          // tx bandwidth
-            p.extend_from_slice(&0u32.to_le_bytes());          // rx bandwidth
-            p.extend_from_slice(&0x0060u16.to_le_bytes());     // voice setting: CVSD
-            p.push(0x02);                                      // retransmission effort
-            p.extend_from_slice(&0x03FFu16.to_le_bytes());     // packet types
+            p.push(0x13); // reason
             let _ = self.hci.command_status(op::REJECT_SYNCHRONOUS_CONNECTION, &p);
             return;
         }
