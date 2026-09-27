@@ -48,6 +48,7 @@ pub enum Event {
     HidReport { id: DeviceId, input: HidInput },
     AudioVolumeChanged { id: DeviceId, volume: u8 },
     A2dpStateChanged { id: DeviceId, state: String },
+    ScoStateChanged { id: DeviceId, connected: bool },
 }
 
 #[derive(Clone, Default)]
