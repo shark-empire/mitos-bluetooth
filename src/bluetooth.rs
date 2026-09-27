@@ -99,6 +99,9 @@ impl AdapterRuntime {
         self.pairing.on_event(ev);
         if ev.code == crate::hci::ev::LE_META_EVENT && ev.le_sub() == crate::hci::ev::LE_LTK_REQUEST {
             self.smp.on_ltk_request(ev);
+        if ev.code == crate::hci::ev::SYNCHRONOUS_CONNECTION_COMPLETE {
+            self.audio.on_sco_complete(ev);
+          }
         }
     }
 
