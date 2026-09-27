@@ -76,4 +76,6 @@ impl ProfileManager {
         for p in self.custom.lock().unwrap().iter() { let _ = p.disconnect(device); }
         Ok(())
     }
+    /// Called by ConnectionManager when a SCO/eSCO connection request arrives.
+    pub fn accept_sco(&self, addr: &crate::device::Address) -> bool { self.audio.accept_sync(addr) }
 }
