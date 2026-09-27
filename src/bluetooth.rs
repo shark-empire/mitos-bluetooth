@@ -158,6 +158,38 @@ impl BluetoothManager {
             .ok_or_else(|| Error::NotFound(format!("adapter hci{index} (is Bluetooth powered on?)")))
     }
 
+
+    // ---- GATT (LE only for now) ----
+    fn conn_handle(&self, index: u32, id: &DeviceId) -> Result<u16> {
+        let rt = self.runtime(index)?;
+        if id.address_type == AddressType::Bredr {
+            return Err(Error::InvalidState("GATT requires an LE connection".into()));
+        }
+        rt.connections.handle_of(id).ok_or_else(|| Error::InvalidState("device not connected".into()))
+    }
+    pub fn gatt_services(&self, index: u32, id: &DeviceId) -> Result<Vec<crate::gatt::GattService>> {
+        let h = self.conn_handle(index, id)?;
+        self.runtime(index)?.gatt.discover_services(h)
+    }
+    pub fn gatt_characteristics(&self, index: u32, id: &DeviceId, service_start: u16) -> Result<Vec<crate::gatt::GattCharacteristic>> {
+        let rt = self.runtime(index)?;
+        let h = self.conn_handle(index, id)?;
+        let svc = rt.gatt.discover_services(h)?.into_iter().find(|s| s.start == service_start)
+            .ok_or_else(|| Error::NotFound("service".into()))?;
+        rt.gatt.discover_characteristics(h, &svc)
+    }
+    pub fn gatt_read(&self, index: u32, id: &DeviceId, attribute: u16) -> Result<Vec<u8>> {
+        let h = self.conn_handle(index, id)?;
+        self.runtime(index)?.gatt.read(h, attribute)
+    }
+    pub fn gatt_write(&self, index: u32, id: &DeviceId, attribute: u16, data: &[u8], response: bool) -> Result<()> {
+        let h = self.conn_handle(index, id)?;
+        self.runtime(index)?.gatt.write(h, attribute, data, response)
+    }
+    pub fn gatt_subscribe(&self, index: u32, id: &DeviceId, value_handle: u16, cccd_value: u16) -> Result<()> {
+        let h = self.conn_handle(index, id)?;
+        self.runtime(index)?.gatt.subscribe(h, value_handle, cccd_value)
+    }
     /// Bring up every controller found on the system.
     pub fn init(&self) -> Result<()> {
         *self.state.lock().unwrap() = BluetoothState::TurningOn;
