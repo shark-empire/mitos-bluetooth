@@ -174,6 +174,30 @@ fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value) -> Result<Value> {
             mgr.gatt_subscribe(i, &id, attr, kind)?;
             json!(true)
         }
+                "a2dp_start" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.a2dp_start(i, &id)?; json!(true) }
+        "a2dp_suspend" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.a2dp_suspend(i, &id)?; json!(true) }
+        "a2dp_state" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; serde_json::to_value(mgr.a2dp_state(i, &id)?)? }
+        "a2dp_send_sbc" => {
+            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let data = crate::device::from_hex(&p_str(p, "data")?)?;
+            let nframes = p.get("frames").and_then(|v| v.as_u64()).unwrap_or(1) as u32; // pass real count when batching
+            mgr.a2dp_send_sbc(i, &id, &data, nframes)?;
+            json!(true)
+        }
+        "avrcp_command" => {
+            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let op = p_str(p, "op")?; // play | pause | stop | next | prev | volup | voldown | mute
+            mgr.avrcp_command(i, &id, &op)?;
+            json!(true)
+        }
+        "set_volume" => {
+            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let v = p.get("volume").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("volume required".into()))? as u8;
+            mgr.set_volume(i, &id, v)?;
+            json!(true)
+        }
+        "hfp_connect_sco" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.hfp_connect_sco(i, &id)?; json!(true) }
+        "hfp_disconnect_sco" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.hfp_disconnect_sco(i, &id)?; json!(true) }
         other => return Err(Error::NotFound(format!("unknown method '{other}'"))),
     })
 }
