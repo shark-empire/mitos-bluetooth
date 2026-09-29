@@ -26,22 +26,21 @@ impl PairingManager {
     pub fn new(hci: Arc<HciClient>, devices: Arc<DeviceTable>, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Self {
         let pending: Arc<Mutex<HashMap<DeviceId, PendingPairing>>> = Arc::new(Mutex::new(HashMap::new()));
         let p2 = pending.clone();
-        let hci2 = hci.clone();
+        let bus2 = bus.clone();
         std::thread::Builder::new().name("pairing-janitor".into()).spawn(move || loop {
             std::thread::sleep(Duration::from_secs(5));
             let expired: Vec<DeviceId> = {
                 let mut p = p2.lock().unwrap();
-                p.retain(|_, v| v.created.elapsed() < Duration::from_secs(35));
-                p.keys().copied().collect()
+                let dead: Vec<DeviceId> = p.iter()
+                    .filter(|(_, v)| v.created.elapsed() >= Duration::from_secs(35))
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in &dead { p.remove(id); }
+                dead
             };
             for id in expired {
-                if let Some(v) = p2.lock().unwrap().get(&id) {
-                    if v.created.elapsed() >= Duration::from_secs(35) {
-                        // let HCI time out on its own; surface failure
-                    }
-                }
+                bus2.publish(Event::PairingComplete { id, success: false, error: Some("pairing request timed out".into()) });
             }
-            let _ = &hci2;
         }).ok();
         PairingManager { hci, devices, bus, bonds, pending, io_capability: 0x04, auto_pin: true, default_pin: "0000".into(), just_works_auto: true }
     }
