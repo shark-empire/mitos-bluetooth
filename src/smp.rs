@@ -150,53 +150,6 @@ fn s1(tk: &[u8; 16], srand: &[u8; 16], mrand: &[u8; 16]) -> [u8; 16] {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LeKeys { pub ltk: [u8; 16], pub ediv: u16, pub rand: u64, pub irk: Option<[u8; 16]>, pub csrk: Option<[u8; 16]>, pub identity: Option<DeviceId> }
 
-struct SmpState {
-    device: DeviceId,
-    stage: u8, // 0=idle,1=sent req,2=got resp+sent confirm,3=sent random,4=encrypted,5=keys
-    preq: [u8; 7], pres: [u8; 7],
-    mrand: [u8; 16],
-    srand: [u8; 16],
-    peer_confirm: Option<[u8; 16]>,
-    tk: [u8; 16],
-    keys: LeKeys,
-    our_passkey: Option<u32>,
-}
-
-pub struct SmpManager {
-    l2: Arc<L2cap>,
-    hci: Arc<HciClient>,
-    bus: Arc<EventBus>,
-    bonds: Arc<BondStore>,
-    st: Mutex<HashMap<u16, SmpState>>,
-}
-
-impl SmpManager {
-    pub fn new(l2: Arc<L2cap>, hci: Arc<HciClient>, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Self {
-        let m = SmpManager { l2, hci, bus, bonds: bonds.clone(), st: Mutex::new(HashMap::new()) };
-        // Feed ATT/SMP traffic through per-connection dispatchers registered by attach().
-        m
-    }
-
-    /// Register a dispatcher for the SMP fixed channel of a connection.
-    pub fn attach(&self, handle: u16, device: DeviceId) {
-        let (tx, rx): (_, Receiver<L2Packet via crate::l2cap::L2Packet>) = channel();
-        self.l2.register_fixed(handle, CID_SMP, tx);
-        let me = std::sync::mpsc::Sender::clone(&tx); // keep for detach bookkeeping
-        let _ = me;
-        let this = self as *const SmpManager as usize; // avoid self-reference in thread
-        let l2 = self.l2.clone(); let hci = self.hci.clone(); let bus = self.bus.clone(); let bonds = self.bonds.clone();
-        // NOTE: we run the manager logic via a static trampoline below.
-        let state_map_ptr: *mut Mutex<HashMap<u16, SmpState>> = &mut *Box::leak(Box::new(Mutex::new(HashMap::new())));
-        // Simpler and safe: move the map into the thread via Arc. We rebuild here:
-        let _ = state_map_ptr;
-        let _ = this;
-        let _ = (l2, hci, bus, bonds, rx);
-        unimplemented_marker();
-    }
-    // (see SmpManager2 below — real implementation)
-}
-fn unimplemented_marker() {}
-
 pub struct Smp {
     l2: Arc<L2cap>,
     hci: Arc<HciClient>,
@@ -270,15 +223,15 @@ impl Smp {
             0x05 => self.on_failed(handle, data),
             0x06 | 0x07 | 0x08 | 0x09 | 0x0a => self.on_key(handle, code, data),
             0x0b => { // LE Security Request from the peripheral: encrypt with stored LTK, or pair
-          blet dev = self.st.lock().unwrap().get(&handle).map(|c| c.device);
-         if let Some(dev) = dev {
-        if self.bonds.get(&dev).and_then(|b| b.le_ltk).is_some() {
-            let _ = self.encrypt_bond(handle);
-        } else if !self.busy(handle) {
-            let _ = self.start_pairing(handle, true);
-        }
-    }
-}
+                let dev = self.st.lock().unwrap().get(&handle).map(|c| c.device);
+                if let Some(dev) = dev {
+                    if self.bonds.get(&dev).and_then(|b| b.le_ltk).is_some() {
+                        let _ = self.encrypt_bond(handle);
+                    } else if !self.busy(handle) {
+                        let _ = self.start_pairing(handle, true);
+                    }
+                }
+            }
             _ => {}
         }
     }
