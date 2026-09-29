@@ -242,7 +242,7 @@ impl GattManager {
                         let vh = u16::from_le_bytes([data[off + 3], data[off + 4]]);
                         let uuid = if item_len == 7 { GattUuid::from_le16(&data[off + 5..]) }
                                    else { GattUuid::from_le128(&data[off + 5..]) };
-                        chars.push(GattCharacteristic { start_handle: decl, value_handle: vh, end_handle: 0, uuid, props, descriptors: Vec::new() });
+                        chars.push(GattCharacteristic { start_handle: decl, value_handle: vh, end_handle: 0, uuid, properties: props, descriptors: Vec::new() });
                         off += item_len;
                     }
                     if chars.len() == before { break; }
