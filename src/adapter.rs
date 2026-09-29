@@ -28,7 +28,7 @@ pub fn manufacturer_name(m: u16) -> String {
     match m {
         0x0001 => "Ericsson".into(), 0x0002 => "Nokia".into(), 0x0003 => "Intel".into(),
         0x000a => "CSR".into(), 0x000d => "Texas Instruments".into(), 0x000f => "Broadcom".into(),
-        0x005d => "Realtek".into(), 0x0002 => "Nokia".into(), _ => format!("0x{m:04x}"),
+        0x005d => "Realtek".into(), _ => format!("0x{m:04x}"),
     }
 }
 pub fn hci_version_text(v: u8) -> String {
