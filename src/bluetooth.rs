@@ -155,7 +155,8 @@ impl BluetoothManager {
         let cfg = store.load_config();
         let bonds = Arc::new(BondStore::new(store.clone()));
         Ok(Arc::new(BluetoothManager { bus: EventBus::new(), store, bonds, cfg: Mutex::new(cfg),
-                                       adapters: Mutex::new(HashMap::new()), Duration::from_secs(120), state: Mutex::new(BluetoothState::Off) }))
+                                       adapters: Mutex::new(HashMap::new()), state: Mutex::new(BluetoothState::Off),
+                                       pair_timeout: Duration::from_secs(120) }))
     }
     /// Bring an adapter up with an injected transport (tests / custom kernels).
     pub fn power_on_with(&self, index: u32, transport: Box<dyn crate::hci::HciTransport>) -> Result<AdapterInfo> {
@@ -329,7 +330,7 @@ impl BluetoothManager {
             let remain = deadline.saturating_duration_since(Instant::now());
             if remain.is_zero() { break; }
             match rx.recv_timeout(remain) {
-                Ok(Event::PairingComplete { ref dev, success, .. }) if dev == id => {
+                Ok(Event::PairingComplete { id: ref dev, success, .. }) if dev == id => {
                     rt.devices.lock().unwrap().get_mut(id)
                         .map(|d| d.state = if success { DeviceState::Paired } else { DeviceState::Discovered });
                     if !success { return Err(Error::PairingFailed("pairing rejected or failed".into())); }
