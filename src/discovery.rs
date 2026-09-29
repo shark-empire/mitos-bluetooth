@@ -111,7 +111,8 @@ impl DiscoveryManager {
     }
 
     fn on_result(&self, ev: &HciEvent, kind: u8) {
-        let record_len = match kind { 0x02 => 15, 0x22 => 14, _ => 254 };
+        // per-record: BD_ADDR(6) + PSRM(1) + Reserved(1 or 2) + CoD(3) + ClockOffset(2) [+ RSSI(1) for 0x22]
+        let record_len = match kind { 0x02 => 14, 0x22 => 14, _ => 254 };
         let mut off = 1; // skip num_responses
         while off + record_len <= ev.params.len() {
             let addr = ev.addr(off);
