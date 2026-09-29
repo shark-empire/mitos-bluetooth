@@ -90,7 +90,6 @@ pub mod ev {
     pub const LE_CONNECTION_COMPLETE: u8 = 0x01;
     pub const LE_ADVERTISING_REPORT: u8 = 0x02;
     pub const LE_LTK_REQUEST: u8 = 0x05;
-    pub const SYNCHRONOUS_CONNECTION_COMPLETE: u8 = 0x2c;
 }
 
 pub const ACL_PB_START: u16 = 0x1000;
@@ -490,8 +489,10 @@ fn process_packet(inner: &Inner, pkt: &[u8]) {
 fn handle_event(inner: &Inner, ev: HciEvent) {
     match ev.code {
         ev::COMMAND_COMPLETE => {
-            let opcode = ev.u16(2);
-            let ret = ev.params[4..].to_vec();
+            // Event_Parameters: [Num_HCI_Command_Packets(1)][Command_Opcode(2)][Return_Parameters...]
+            if ev.params.len() < 3 { return; }
+            let opcode = ev.u16(1);
+            let ret = ev.params[3..].to_vec();
             on_credits(inner, opcode, &ret);
             let waiters = { let mut p = inner.state.lock().unwrap(); p.complete.remove(&opcode).unwrap_or_default() };
             for w in waiters { let _ = w.send(ret.clone()); }
@@ -539,7 +540,7 @@ fn on_credits(inner: &Inner, opcode: u16, ret: &[u8]) {
     let mut c = inner.credits.lock().unwrap();
     if opcode == op::READ_BUFFER_SIZE && ret.len() >= 9 && ret[0] == 0 {
         let mtu = u16::from_le_bytes([ret[1], ret[2]]);
-        let num = u16::from_le_bytes([ret[5], ret[6]]);
+        let num = u16::from_le_bytes([ret[4], ret[5]]);
         if num > 0 { *c = Credits { mtu, available: num as u32, set: true }; }
     } else if opcode == op::LE_READ_BUFFER_SIZE && ret.len() >= 4 && ret[0] == 0 && !c.set {
         let mtu = u16::from_le_bytes([ret[1], ret[2]]);
