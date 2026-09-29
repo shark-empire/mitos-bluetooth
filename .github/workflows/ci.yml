@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+      - name: cargo check (lib + bin + tests)
+        run: cargo check --all-targets --verbose
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+        continue-on-error: true # style only for now — drop continue-on-error once the tree is formatted
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        continue-on-error: true # drop continue-on-error once you're ready to enforce lints in CI
+
+  build:
+    name: build
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build (debug, fast feedback)
+        run: cargo build --all-targets --verbose
+      - name: Build (release)
+        run: cargo build --release --verbose
+      - name: Upload mitos-bluetooth binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: mitos-bluetooth-${{ github.sha }}
+          path: target/release/mitos-bluetooth
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    name: test
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Every test drives BluetoothManager over hci::MockTransport (a fully
+      # in-process simulated controller) — no real adapter, root, or
+      # CAP_NET_ADMIN needed on the runner.
+      - name: cargo test (unit + integration)
+        run: cargo test --all-targets --verbose
