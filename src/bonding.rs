@@ -38,7 +38,7 @@ impl BondStore {
     pub fn upsert_classic(&self, id: &DeviceId, key: &[u8; 16], key_type: u8, name: Option<String>) {
         let mut b = self.bonds.lock().unwrap();
         let entry = b.entry(*id).or_insert_with(|| Bond {
-            device: *id, name, class: 0, link_key: None, link_key_type: None,
+            device: *id, name: None, class: 0, link_key: None, link_key_type: None,
             le_ltk: None, le_ediv: 0, le_rand: 0, le_irk: None,
             trusted: true, profiles: Vec::new(), created: crate::device::now_ts(), last_connected: 0,
         });
@@ -53,7 +53,7 @@ impl BondStore {
     pub fn upsert_le(&self, id: &DeviceId, keys: &LeKeys, name: Option<String>) {
         let mut b = self.bonds.lock().unwrap();
         let entry = b.entry(*id).or_insert_with(|| Bond {
-            device: *id, name, class: 0, link_key: None, link_key_type: None,
+            device: *id, name: None, class: 0, link_key: None, link_key_type: None,
             le_ltk: None, le_ediv: 0, le_rand: 0, le_irk: None,
             trusted: true, profiles: Vec::new(), created: crate::device::now_ts(), last_connected: 0,
         });
@@ -107,3 +107,4 @@ impl BondStore {
         drop(b);
         self.store.save_bonds(&snapshot);
     }
+}
