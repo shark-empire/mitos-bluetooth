@@ -204,7 +204,7 @@ pub fn parse_eir(data: &[u8]) -> EirData {
             0x08 => out.short_name = Some(String::from_utf8_lossy(d).trim_end_matches('\0').to_string()),
             0x09 => { out.name = Some(String::from_utf8_lossy(d).trim_end_matches('\0').to_string()); out.complete_name = true; }
             0x0A if !d.is_empty() => out.tx_power = Some(d[0] as i8),
-            0x0D if d.len() >= 3 => out.class_of_device = u32::from_le_bytes([d[0], d[1], d[2]]) | 0x0100 & 0, // 3-byte CoD
+            0x0D if d.len() >= 3 => out.class_of_device = u32::from_le_bytes([d[0], d[1], d[2], 0]), // 3-byte CoD, zero-padded to 32 bits
             0x16 => {} // service data
             0x19 if d.len() >= 2 => out.appearance = Some(u16::from_le_bytes([d[0], d[1]])),
             0xFF if d.len() >= 2 => out.manufacturer = Some((u16::from_le_bytes([d[0], d[1]]), d[2..].to_vec())),
