@@ -17,9 +17,13 @@ pub const CID_ATT: u16 = 0x0004;
 pub const CID_LE_SIGNALING: u16 = 0x0005;
 pub const CID_SMP: u16 = 0x0006;
 
+/// Spec default L2CAP MTU (in force until the peer's configure request says otherwise) and the spec minimum.
+pub const DEFAULT_MTU: u16 = 672;
+pub const MIN_MTU: u16 = 48;
+
 pub struct L2Packet { pub handle: u16, pub cid: u16, pub psm: u16, pub data: Vec<u8>, pub closed: bool }
 
-struct Channel { handle: u16, remote_cid: u16, psm: u16, mtu: u16}
+struct Channel { handle: u16, remote_cid: u16, psm: u16, mtu: u16 }
 struct L2State {
     next_cid: u16,
     next_ident: u8,
@@ -70,7 +74,7 @@ impl L2cap {
         st.devices.remove(&handle);
     }
 
-    pub fn connect(&self, handle: u16, psm: u16, mtu: 672,) -> Result<u16> {
+    pub fn connect(&self, handle: u16, psm: u16) -> Result<u16> {
         let (scid, ident, rx) = {
             let mut st = self.st.lock().unwrap();
             let scid = st.next_cid;
@@ -81,40 +85,41 @@ impl L2cap {
             if st.next_ident == 0 { st.next_ident = 1; }
             let (tx, rx) = channel();
             st.waiters.insert(ident, tx);
-            st.channels.insert(scid, Channel { handle, remote_cid: 0, psm });
+            st.channels.insert(scid, Channel { handle, remote_cid: 0, psm, mtu: DEFAULT_MTU });
             (scid, ident, rx)
         };
         // Connection Request: [psm][scid]
-        let resp = match self.sig_request(handle, 0x02, ident, &psm.to_le_bytes(), &scid.to_le_bytes()) ...and_then(|_| rx_recv(rx, ident, self, 10))?; {
+        let mut req = psm.to_le_bytes().to_vec();
+        req.extend_from_slice(&scid.to_le_bytes());
+        let resp = match self.sig_request(handle, 0x02, ident, &req).and_then(|_| rx_recv(rx, ident, self, 10)) {
             Ok(v) => v,
             Err(e) => { let mut st = self.st.lock().unwrap(); st.channels.remove(&scid); st.waiters.remove(&ident); return Err(e); }
         };
-        if resp.0 != 0x03 { return Err(Error::L2cap(format!("unexpected response 0x{:02x}", resp.0))); }
+        // every failure below must forget the half-open channel
+        let abort = |e: Error| -> Error { self.st.lock().unwrap().channels.remove(&scid); e };
+        if resp.0 != 0x03 { return Err(abort(Error::L2cap(format!("unexpected response 0x{:02x}", resp.0)))); }
+        if resp.1.len() < 8 { return Err(abort(Error::L2cap("short connection response".into()))); }
         let dcid = le16(&resp.1, 0);
         let result = le16(&resp.1, 4);
-        if result != 0 { let mut st = self.st.lock().unwrap(); st.channels.remove(&scid); return Err(Error::L2cap(format!("connection refused on psm 0x{psm:04x}: result {result}"))); }
-        { let mut st = self.st.lock().unwrap(); st.channels.get_mut(&scid).unwrap().remote_cid = dcid; }
+        if result != 0 { return Err(abort(Error::L2cap(format!("connection refused on psm 0x{psm:04x}: result {result}")))); }
+        if let Some(c) = self.st.lock().unwrap().channels.get_mut(&scid) { c.remote_cid = dcid; }
 
         // Configure: advertise our MTU. Remote config request is auto-answered in on_signaling.
         let (ident2, rx2) = { let mut st = self.st.lock().unwrap(); let i = st.next_ident; st.next_ident = if st.next_ident == 255 { 1 } else { st.next_ident + 1 }; let (tx, rx) = channel(); st.waiters.insert(i, tx); (i, rx) };
         let mut payload = dcid.to_le_bytes().to_vec();
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        payload.extend_from_slice(&[0x01, 0x02]); // MTU option
-        payload.extend_from_slice(&672u16.to_le_bytes());
-        let r2 = self.sig_request(handle, 0x04, ident2, &payload)...and_then(|_| rx_recv(rx, ident, self, 10))?;
+        payload.extend_from_slice(&0u16.to_le_bytes());          // flags
+        payload.extend_from_slice(&[0x01, 0x02]);                // MTU option: type, length
+        payload.extend_from_slice(&DEFAULT_MTU.to_le_bytes());
+        let r2 = self.sig_request(handle, 0x04, ident2, &payload).and_then(|_| rx_recv(rx2, ident2, self, 10));
         match r2 {
-            Ok((0x05, data)) if data.len() >= 4 => {
-                let mut i = 4;
-                let mut result = 0u16;
-                while i + 2 <= data.len() {
-                    let t = data[i]; let l = data[i + 1] as usize;
-                    if t == 0x04 && i + 2 + 2 <= data.len() { result = le16(&data, i + 2); }
-                    i += 2 + l;
-                }
-                if result != 0 && result != 0x0002 { return Err(Error::L2cap(format!("configure failed: {result}"))); }
+            // Configure Response: [scid][flags][result][options]
+            Ok((0x05, data)) if data.len() >= 6 => {
+                let result = le16(&data, 4);
+                if result != 0 { return Err(abort(Error::L2cap(format!("configure failed: result {result}")))); }
             }
-            Ok((c, _)) => return Err(Error::L2cap(format!("unexpected configure response 0x{c:02x}"))),
-            Err(e) => return Err(e),
+            Ok((0x05, _)) => return Err(abort(Error::L2cap("short configure response".into()))),
+            Ok((c, _)) => return Err(abort(Error::L2cap(format!("unexpected configure response 0x{c:02x}")))),
+            Err(e) => { self.drop_waiter(ident2); return Err(abort(e)); }
         }
         Ok(scid)
     }
@@ -144,7 +149,7 @@ impl L2cap {
         let (ident, rx) = { let mut st = self.st.lock().unwrap(); let i = st.next_ident; st.next_ident = if st.next_ident == 255 { 1 } else { st.next_ident + 1 }; let (tx, rx) = channel(); st.waiters.insert(i, tx); (i, rx) };
         let mut payload = rcid.to_le_bytes().to_vec();
         payload.extend_from_slice(&cid.to_le_bytes());
-        let _ = self.sig_request(handle, 0x06, ident, &payload)...and_then(|_| rx_recv(rx, ident, self, 10))?;
+        if self.sig_request(handle, 0x06, ident, &payload).is_ok() { let _ = rx_recv(rx, ident, self, 3); } else { self.drop_waiter(ident); }
         let mut st = self.st.lock().unwrap();
         st.channels.remove(&cid);
         if let Some(tx) = st.handlers.remove(&cid) { let _ = tx.send(L2Packet { handle, cid, psm, data: Vec::new(), closed: true }); }
@@ -183,16 +188,29 @@ impl L2cap {
         while i + 4 <= data.len() {
             let code = data[i]; let ident = data[i + 1]; let len = le16(data, i + 2) as usize;
             let payload = data.get(i + 4..i + 4 + len).unwrap_or(&[]);
-            if code == 0x12 { // Connection Parameter Update Request -> accept
-                let mut p = vec![0x01, ident, 0x02, 0x00, 0x00, 0x00];
-                p.extend_from_slice(&0u16.to_le_bytes());
+            if code == 0x12 { // Connection Parameter Update Request: [min][max][latency][timeout]
+                let valid = payload.len() >= 8 && {
+                    let (imin, imax, lat, to) = (le16(payload, 0), le16(payload, 2), le16(payload, 4), le16(payload, 6));
+                    (6..=3200).contains(&imin) && (6..=3200).contains(&imax) && imin <= imax
+                        && lat <= 499 && (10..=3200).contains(&to)
+                        && u32::from(to) * 4 > (1 + u32::from(lat)) * u32::from(imax)
+                };
+                // Connection Parameter Update Response: result 0 = accepted, 1 = rejected
+                let p = [0x13, ident, 0x02, 0x00, if valid { 0x00 } else { 0x01 }, 0x00];
                 let _ = self.send_fixed(handle, CID_LE_SIGNALING, &p);
+                if valid {
+                    // we are the central: apply it with HCI LE Connection Update (opcode 0x2013)
+                    let mut c = handle.to_le_bytes().to_vec();
+                    c.extend_from_slice(&payload[..8]);
+                    c.extend_from_slice(&[0, 0, 0, 0]); // min/max connection event length: unspecified
+                    let _ = self.hci.command_status(0x2013, &c);
+                }
             }
             i += 4 + len;
         }
     }
 
-    fn on_signaling(&self, handle: u16, mtu: 672, data: &[u8]) {
+    fn on_signaling(&self, handle: u16, data: &[u8]) {
         let mut i = 0;
         while i + 4 <= data.len() {
             let code = data[i]; let ident = data[i + 1]; let len = le16(data, i + 2) as usize;
@@ -210,65 +228,71 @@ impl L2cap {
                         let psm = le16(&payload, 0); let their = le16(&payload, 2);
                         let listener = self.st.lock().unwrap().listeners.get(&psm).cloned();
                         if let Some(tx) = listener {
-                            let mut st = self.st.lock().unwrap();
-                            let dcid = st.next_cid; st.next_cid += 1;
-                            st.channels.insert(dcid, Channel { handle, remote_cid: their, psm });
-                            drop(st);
-                            let mut resp = vec![dcid as u8, (dcid >> 8) as u8];
+                            let (dcid, cfg_ident) = {
+                                let mut st = self.st.lock().unwrap();
+                                let dcid = st.next_cid; st.next_cid += 1;
+                                st.channels.insert(dcid, Channel { handle, remote_cid: their, psm, mtu: DEFAULT_MTU });
+                                let ci = st.next_ident; st.next_ident = if ci == 255 { 1 } else { ci + 1 };
+                                (dcid, ci)
+                            };
+                            let mut resp = dcid.to_le_bytes().to_vec();
                             resp.extend_from_slice(&their.to_le_bytes());
                             resp.extend_from_slice(&0u16.to_le_bytes()); // result: success
                             resp.extend_from_slice(&0u16.to_le_bytes()); // status
                             let _ = self.sig_request(handle, 0x03, ident, &resp);
+                            // our own Configure Request: both directions must be configured before the channel is open
+                            let mut cfg = their.to_le_bytes().to_vec();
+                            cfg.extend_from_slice(&0u16.to_le_bytes());          // flags
+                            cfg.extend_from_slice(&[0x01, 0x02]);                // MTU option
+                            cfg.extend_from_slice(&DEFAULT_MTU.to_le_bytes());
+                            let _ = self.sig_request(handle, 0x04, cfg_ident, &cfg);
                             let _ = tx.send(L2Packet { handle, cid: dcid, psm, data: Vec::new(), closed: false });
                         } else {
-                            // reject: connection refused
-                            let mut resp = le16(&payload, 2).to_le_bytes().to_vec();
-                            resp.extend_from_slice(&[0, 0]);
+                            // refuse: PSM not supported -> [dcid = 0][scid = theirs][result][status]
+                            let mut resp = vec![0u8, 0];
+                            resp.extend_from_slice(&their.to_le_bytes());
                             resp.extend_from_slice(&0x0002u16.to_le_bytes());
                             resp.extend_from_slice(&[0, 0]);
                             let _ = self.sig_request(handle, 0x03, ident, &resp);
                         }
                     }
                 }
-                
+
                 0x04 => { // inbound Configure Request: [dcid(ours)][flags][opts]
                     if payload.len() >= 4 {
                         let ours = le16(&payload, 0);
-                        // learn the peer's receive MTU (option type 0x01) — needed for A2DP
+                        // learn the peer's receive MTU (option type 0x01) - needed for A2DP packet sizing
                         let mut i = 4;
                         while i + 2 <= payload.len() {
                             let t = payload[i]; let l = payload[i + 1] as usize;
-                            if t == 0x01 && i + 4 <= payload.len() {
+                            if t == 0x01 && l >= 2 && i + 4 <= payload.len() {
                                 let m = le16(&payload, i + 2);
                                 let mut st = self.st.lock().unwrap();
-                                if let Some(c) = st.channels.get_mut(&ours) { c.mtu = m.max(48); }
+                                if let Some(c) = st.channels.get_mut(&ours) { c.mtu = m.max(MIN_MTU); }
                             }
                             i += 2 + l;
                         }
+                        // Configure Response: [scid = our endpoint][flags][result: success]
                         let mut resp = payload[..2].to_vec();
                         resp.extend_from_slice(&0u16.to_le_bytes());
-                        resp.extend_from_slice(&[0x04, 0x02, 0x00, 0x00]); // result: success
+                        resp.extend_from_slice(&0u16.to_le_bytes());
                         let _ = self.sig_request(handle, 0x05, ident, &resp);
                     }
                 }
-                
+
                 0x06 => { // inbound Disconnect Request: [dcid(ours)][scid(theirs)]
                     if payload.len() >= 4 {
-                        let ours = le16(&payload, 0); let theirs = le16(&payload, 2);
-                        let mut resp = theirs.to_le_bytes().to_vec();
-                        resp.extend_from_slice(&ours.to_le_bytes());
-                        let _ = self.sig_request(handle, 0x07, ident, &resp);
+                        let ours = le16(&payload, 0);
+                        // Disconnect Response echoes both CIDs unchanged
+                        let _ = self.sig_request(handle, 0x07, ident, &payload[..4]);
                         let mut st = self.st.lock().unwrap();
                         st.channels.remove(&ours);
                         if let Some(tx) = st.handlers.remove(&ours) { let _ = tx.send(L2Packet { handle, cid: ours, psm: 0, data: Vec::new(), closed: true }); }
                     }
                 }
                 _ => {
-                    // command reject for anything we don't handle
-                    let mut resp = vec![ident, 0x01, 0x02, 0x00];
-                    resp.extend_from_slice(&0u16.to_le_bytes());
-                    let p = vec![0x01, ident, 0x02, 0x00, 0x00, 0x00];
-                    p.extend_from_slice(&resp);
+                    // Command Reject, reason 0x0000 (command not understood)
+                    let p = [0x01, ident, 0x02, 0x00, 0x00, 0x00];
                     let _ = self.send_fixed(handle, CID_SIGNALING, &p);
                 }
             }
@@ -277,15 +301,15 @@ impl L2cap {
     }
 }
 
-// small helper so we can clean waiters on failure paths
 impl L2cap {
+    // small helper so we can clean waiters on failure paths
     fn drop_waiter(&self, ident: u8) { self.st.lock().unwrap().waiters.remove(&ident); }
-}
 
     /// Peer's receive MTU for a channel (the max SDU we may send it).
     pub fn remote_mtu(&self, cid: u16) -> u16 {
-        self.st.lock().unwrap().channels.get(&cid).map(|c| c.mtu).unwrap_or(48)
+        self.st.lock().unwrap().channels.get(&cid).map(|c| c.mtu).unwrap_or(MIN_MTU)
     }
+}
 
 fn rx_recv(rx: Receiver<(u8, Vec<u8>)>, ident: u8, l2: &L2cap, secs: u64) -> Result<(u8, Vec<u8>)> {
     match rx.recv_timeout(Duration::from_secs(secs)) {
