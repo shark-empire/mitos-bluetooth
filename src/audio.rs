@@ -119,7 +119,7 @@ pub struct HfpSession { pub cid: u16, pub is_hsp: bool, pub volume: u8, pub mic_
 // ===================== small binary-socket helper =====================
 // Protocol: [2-byte BE length][payload], both directions. Used by the A2DP and SCO bridges.
 
-struct BinSock {
+pub struct BinSock {
     clients: Mutex<Vec<UnixStream>>,
     running: AtomicBool,
     path: String,
@@ -520,7 +520,7 @@ impl AudioManager {
 // ===================== AVDTP internals =====================
 
 struct SigCmd { signal: u8, payload: Vec<u8>, reply: Sender<Result<Vec<u8>>> }
-enum SigMsg { Cmd(SigCmd), Pkt(L2Packet) }
+pub enum SigMsg { Cmd(SigCmd), Pkt(L2Packet) }
 
 /// Sequential AVDTP signaling actor per session: matches responses by transaction label.
 fn spawn_sig_actor(l2: Arc<L2cap>, cid: u16, delay_ms: Arc<Mutex<Option<u32>>>) -> Sender<SigMsg> {
@@ -637,7 +637,7 @@ fn send_media_packet(l2: &L2cap, a: &mut A2dpSession, frames: &[u8], nframes: u3
 // ===================== AVRCP internals =====================
 
 struct AvrcpCmd { avc: Vec<u8>, reply: Option<Sender<Result<Vec<u8>>>> }
-enum AvrMsg { Cmd(AvrcpCmd), Pkt(L2Packet) }
+pub enum AvrMsg { Cmd(AvrcpCmd), Pkt(L2Packet) }
 
 /// AVRCP controller actor. Handles: command/response matching by transaction label,
 /// VOLUME_CHANGED notifications (interim + final, with re-registration), and answers
