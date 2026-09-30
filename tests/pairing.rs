@@ -8,7 +8,7 @@ fn temp_mgr(tag: &str) -> (std::sync::Arc<BluetoothManager>, std::sync::Arc<std:
     let shared = mock.shared();
     let dir = std::env::temp_dir().join(format!("mitos-bt-pair-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mgr = BluetoothManager::new(dir.to_string_lossy().into_owned()).unwrap();
+    let mgr = BluetoothManager::new(&dir.to_string_lossy()).unwrap();
     mgr.pair_timeout = Duration::from_secs(10);
     mgr.power_on_with(0, Box::new(mock)).unwrap();
     (mgr, shared)
@@ -37,7 +37,7 @@ fn pair_via_ssp_just_works_and_bonds() {
 
 #[test]
 fn legacy_pin_request_is_auto_answered() {
-    let (mgr, shared) = temp_mgr("pin");
+    let (_mgr, shared) = temp_mgr("pin");
     let addr = [0x66u8, 0x55, 0x44, 0x33, 0x22, 0x14];
     let mut ev = vec![0x04, 0x16, 0x06]; // PIN Code Request
     ev.extend_from_slice(&addr);
