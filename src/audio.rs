@@ -225,8 +225,10 @@ impl AudioManager {
         Arc::new(AudioManager { hci, l2, devices, bus, st, a2dp_sock, sco_sock })
     }
 
-    fn session_entry(&self, device: &DeviceId, handle: u16) -> &mut AudioSession {
-        let mut st = self.st.lock().unwrap();
+    /// Look up (or create) a device's session within an *already-locked* map, so the
+    /// returned `&mut AudioSession` borrows from the caller's own guard rather than one
+    /// local to this function (which would be dropped before the reference could be used).
+    fn session_entry<'a>(st: &'a mut HashMap<DeviceId, AudioSession>, device: &DeviceId, handle: u16) -> &'a mut AudioSession {
         st.entry(*device).or_insert_with(|| AudioSession { conn_handle: handle, a2dp: None, avrcp: None, hfp: None, sco_handle: None })
     }
 
@@ -266,7 +268,8 @@ impl AudioManager {
         let media_cid = self.l2.connect(handle, PSM_AVDTP)?;
         let mut ssrc = [0u8; 4];
         if let Ok(mut f) = std::fs::File::open("/dev/urandom") { let _ = f.read_exact(&mut ssrc); }
-        let s = self.session_entry(device, handle);
+        let mut guard = self.st.lock().unwrap();
+        let s = Self::session_entry(&mut guard, device, handle);
         s.a2dp = Some(A2dpSession {
             sig, sig_cid, media_cid, seid, cfg,
             started: false, seq: 0, ts: 0, ssrc: u32::from_le_bytes(ssrc),
@@ -338,12 +341,13 @@ impl AudioManager {
         let st = self.st.lock().unwrap();
         let a = st.get(device)?.a2dp.as_ref()?;
         let mtu = self.l2.remote_mtu(a.media_cid);
-        Some(A2dpInfo {
+        let info = Some(A2dpInfo {
             started: a.started, config: a.cfg, mtu,
             max_packet_payload: mtu.saturating_sub(13 + PREPEND_MEDIA_HEADER as u16),
             delay_ms: *a.delay_ms.lock().unwrap(),
             socket_path: a.socket_path.clone(),
-        })
+        });
+        info
     }
 
     /// Send pre-encoded SBC frames (one RTP packet's worth). `nframes` advances RTP timestamps.
@@ -359,7 +363,8 @@ impl AudioManager {
     pub fn connect_avrcp(self: &Arc<Self>, device: &DeviceId, handle: u16) -> Result<()> {
         let cid = self.l2.connect(handle, PSM_AVCTP)?;
         let ctl = spawn_avrcp_actor(self.l2.clone(), cid, *device, self.bus.clone());
-        let s = self.session_entry(device, handle);
+        let mut guard = self.st.lock().unwrap();
+        let s = Self::session_entry(&mut guard, device, handle);
         s.avrcp = Some(AvrcpSession { cid, ctl });
         Ok(())
     }
@@ -373,7 +378,8 @@ impl AudioManager {
         let (tx, rx) = channel();
         ctl.send(AvrMsg::Cmd(AvrcpCmd { avc: vec![0x7C, 0x48, op, 0x00], reply: Some(tx) }))
             .map_err(|_| Error::InvalidState("avrcp session gone".into()))?;
-        rx.recv_timeout(Duration::from_secs(5))?
+        rx.recv_timeout(Duration::from_secs(5))??;
+        Ok(())
     }
 
     /// Absolute volume, 0-127 (AVRCP 1.4+).
@@ -388,7 +394,8 @@ impl AudioManager {
         let avc = vec![0x00, 0x48, 0x00, 0x19, 0x58, 0x19, 0x00, 0x00, 0x01, v];
         ctl.send(AvrMsg::Cmd(AvrcpCmd { avc, reply: Some(tx) }))
             .map_err(|_| Error::InvalidState("avrcp session gone".into()))?;
-        rx.recv_timeout(Duration::from_secs(5))?
+        rx.recv_timeout(Duration::from_secs(5))??;
+        Ok(())
     }
 
     // ===================== HFP / HSP (Audio Gateway role) =====================
@@ -426,7 +433,8 @@ impl AudioManager {
             }
             st.lock().unwrap().get_mut(&dev).and_then(|s| s.hfp.take());
         }).ok();
-        let s = self.session_entry(device, handle);
+        let mut guard = self.st.lock().unwrap();
+        let s = Self::session_entry(&mut guard, device, handle);
         s.hfp = Some(HfpSession { cid, is_hsp, volume: 9, mic_volume: 9 });
         Ok(())
     }
