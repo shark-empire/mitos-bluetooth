@@ -115,7 +115,7 @@ pub fn parse_descriptor(d: &[u8]) -> Vec<ReportFormat> {
 
 // ===================== report decoding =====================
 
-struct RawEvent { page: u16, usage: u16, value: i32, variable: bool, lmin: i32, lmax: i32 }
+pub struct RawEvent { page: u16, usage: u16, value: i32, variable: bool, lmin: i32, lmax: i32 }
 
 fn extract_bits(data: &[u8], bit_off: usize, bits: usize) -> u64 {
     let mut v = 0u64;
