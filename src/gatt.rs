@@ -207,9 +207,10 @@ impl GattManager {
                         services.push(GattService { start: sh, end: eh, uuid });
                         off += item_len;
                     }
-                    if services.len() == before { break; }
-                    start = services.last().unwrap().end.wrapping_add(1);
-                    if start == 0 || start > 0xFFFF { break; }
+if services.len() == before { break; }
+start = services.last().unwrap().end.wrapping_add(1);
+if start == 0 { break; }
+
                 }
                 Err(Error::Att { code: att::ERR_ATTR_NOT_FOUND, .. }) => break, // normal terminator
                 Err(e) => return Err(e),
