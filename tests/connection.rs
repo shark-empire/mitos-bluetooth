@@ -11,7 +11,7 @@ fn temp_mgr(tag: &str) -> (Arc<BluetoothManager>, Arc<std::sync::Mutex<mitos_blu
     let shared = mock.shared();
     let dir = std::env::temp_dir().join(format!("mitos-bt-conn-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mgr = BluetoothManager::new(dir.to_string_lossy().into_owned()).unwrap();
+    let mgr = BluetoothManager::new(&dir.to_string_lossy()).unwrap();
     mgr.power_on_with(0, Box::new(mock)).unwrap();
     (mgr, shared)
 }
