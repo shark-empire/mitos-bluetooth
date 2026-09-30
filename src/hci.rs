@@ -276,8 +276,10 @@ struct PendState {
     complete: HashMap<u16, Vec<Sender<Vec<u8>>>>,
     status: HashMap<u16, Vec<Sender<u8>>>,
     event_waiters: VecDeque<(u64, Box<dyn Fn(&HciEvent) -> bool + Send>, Sender<HciEvent>)>,
+    recent_events: VecDeque<HciEvent>, // Buffer recent unhandled events
     acl_rx: HashMap<u16, Vec<u8>>,
 }
+
 struct Credits { mtu: u16, available: u32, set: bool }
 
 struct Inner {
@@ -314,7 +316,7 @@ impl HciClient {
         let reader_tr = transport.try_clone()?;
         let inner = Arc::new(Inner {
             transport: Mutex::new(transport),
-            state: Mutex::new(PendState { complete: HashMap::new(), status: HashMap::new(), event_waiters: VecDeque::new(), acl_rx: HashMap::new() }),
+            state: Mutex::new(PendState { complete: HashMap::new(), status: HashMap::new(), event_waiters: VecDeque::new(), recent_events: VecDeque::new(), acl_rx: HashMap::new() }),
             cmd_lock: Mutex::new(()),
             credits: Mutex::new(Credits { mtu: 27, available: 8, set: false }),
             credits_cv: Condvar::new(),
@@ -400,6 +402,13 @@ impl HciClient {
     /// Wait for an event matching `pred`. Does not consume other waiters or the core handler.
     pub fn wait_event<F>(&self, pred: F, timeout: Duration) -> Result<HciEvent>
     where F: Fn(&HciEvent) -> bool + Send + 'static {
+    // Check if event was already received and buffered
+    {
+        let mut p = self.inner.state.lock().unwrap();
+        if let Some(idx) = p.recent_events.iter().position(&pred) {
+            return Ok(p.recent_events.remove(idx).unwrap());
+        }
+    }
         let (tx, rx) = channel();
         let id = self.inner.next_event_id.fetch_add(1, Ordering::Relaxed);
         {
@@ -529,6 +538,12 @@ fn handle_event(inner: &Inner, ev: HciEvent) {
                 let (_, _, tx) = p.event_waiters.remove(i).unwrap();
                 out.push(tx);
             } else { i += 1; }
+        }
+        if out.is_empty() {
+            p.recent_events.push_back(ev.clone());
+            if p.recent_events.len() > 32 {
+                p.recent_events.pop_front();
+            }
         }
         out
     };
