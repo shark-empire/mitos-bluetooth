@@ -8,8 +8,11 @@ fn temp_mgr(tag: &str) -> (std::sync::Arc<BluetoothManager>, std::sync::Arc<std:
     let shared = mock.shared();
     let dir = std::env::temp_dir().join(format!("mitos-bt-pair-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mgr = BluetoothManager::new(&dir.to_string_lossy()).unwrap();
-    mgr.pair_timeout = Duration::from_secs(10);
+    let mut mgr = BluetoothManager::new(&dir.to_string_lossy()).unwrap();
+      if let Some(mgr_ref) = Arc::get_mut(&mut mgr) {
+    mgr_ref.pair_timeout = Duration::from_secs(10);
+       }
+
     mgr.power_on_with(0, Box::new(mock)).unwrap();
     (mgr, shared)
 }
