@@ -539,20 +539,24 @@ mod tests {
         0xC0,
     ];
 
-    #[test]
-    fn parse_and_decode_keyboard() {
-        let formats = parse_descriptor(KBD);
-        assert!(formats.iter().any(|f| f.kind == 0 && f.report_id == Some(1)));
-        let data = [0x02, 0x00, 0x04, 0x05, 0x00, 0x00, 0x00, 0x00];
-        let input = decode_report(&formats, &data);
-        match input {
-            HidInput::Keyboard { modifiers, keys } => {
-                assert_eq!(modifiers, 0x02); // left shift
-                assert_eq!(keys, vec![4, 5]); // 'a', 'b'
-            }
-            _ => panic!("expected keyboard"),
+#[test]
+fn parse_and_decode_keyboard() {
+    let formats = parse_descriptor(KBD);
+    assert!(formats.iter().any(|f| f.kind == 0 && f.report_id == Some(1)));
+    
+    // Fix: Prepend the Report ID (0x01) to the HID payload
+    let data = [0x01, 0x02, 0x00, 0x04, 0x05, 0x00, 0x00, 0x00, 0x00];
+    
+    let input = decode_report(&formats, &data);
+    match input {
+        HidInput::Keyboard { modifiers, keys } => {
+            assert_eq!(modifiers, 0x02);  // left shift
+            assert_eq!(keys, vec![4, 5]); // 'a', 'b'
         }
+        _ => panic!("expected keyboard"),
     }
+}
+
 
     const MOUSE: &[u8] = &[
         0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x02,
