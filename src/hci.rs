@@ -722,7 +722,7 @@ fn mock_on_command(st: &mut MockState, opcode: u16, params: &[u8]) {
                 let mut p = vec![0x00]; // status
                 p.extend_from_slice(&handle.to_le_bytes());
                 p.extend_from_slice(&addr);
-                p.push(0x00); // link type: ACL
+                p.push(0x01); // link type: ACL
                 p.push(0x00); // not encrypted
                 st.outbox.push_back((t(50), mock_ev(0x03, &p))); // Connection Complete
             }
