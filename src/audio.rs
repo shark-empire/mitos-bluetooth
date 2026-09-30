@@ -519,7 +519,7 @@ impl AudioManager {
 
 // ===================== AVDTP internals =====================
 
-struct SigCmd { signal: u8, payload: Vec<u8>, reply: Sender<Result<Vec<u8>>> }
+pub struct SigCmd { signal: u8, payload: Vec<u8>, reply: Sender<Result<Vec<u8>>> }
 pub enum SigMsg { Cmd(SigCmd), Pkt(L2Packet) }
 
 /// Sequential AVDTP signaling actor per session: matches responses by transaction label.
@@ -636,7 +636,7 @@ fn send_media_packet(l2: &L2cap, a: &mut A2dpSession, frames: &[u8], nframes: u3
 
 // ===================== AVRCP internals =====================
 
-struct AvrcpCmd { avc: Vec<u8>, reply: Option<Sender<Result<Vec<u8>>>> }
+pub struct AvrcpCmd { avc: Vec<u8>, reply: Option<Sender<Result<Vec<u8>>>> }
 pub enum AvrMsg { Cmd(AvrcpCmd), Pkt(L2Packet) }
 
 /// AVRCP controller actor. Handles: command/response matching by transaction label,
