@@ -2,6 +2,8 @@ use mitos_bluetooth::bluetooth::BluetoothManager;
 use mitos_bluetooth::device::{Address, AddressType, DeviceId};
 use mitos_bluetooth::hci::{op, MockTransport};
 use std::time::Duration;
+use std::sync::Arc;
+
 
 fn temp_mgr(tag: &str) -> (std::sync::Arc<BluetoothManager>, std::sync::Arc<std::sync::Mutex<mitos_bluetooth::hci::MockState>>) {
     let mock = MockTransport::new();
