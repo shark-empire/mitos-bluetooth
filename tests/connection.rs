@@ -16,7 +16,8 @@ fn temp_mgr(tag: &str) -> (Arc<BluetoothManager>, Arc<std::sync::Mutex<mitos_blu
     (mgr, shared)
 }
 
-fn wait_for(rx: &mitos_bluetooth::events::EventBus, secs: u64, mut f: impl FnMut(&Event) -> bool) -> bool {
+
+fn wait_for(rx: &std::sync::mpsc::Receiver<Event>, secs: u64, mut f: impl FnMut(&Event) -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
         if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100)) {
