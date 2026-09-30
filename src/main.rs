@@ -37,9 +37,9 @@ fn main() {
     println!("[bluetooth] state: {:?}", mgr.state());
 
     unsafe {
-        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
-    }
+    libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+    libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+     }
     let ipc = IpcServer::new(socket, mgr.clone());
     if let Err(e) = ipc.run(&RUNNING) { eprintln!("[ipc] {e}"); }
 
