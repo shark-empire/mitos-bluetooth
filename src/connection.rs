@@ -154,7 +154,7 @@ impl ConnectionManager {
         self.devices.lock().unwrap().get_mut(&id).map(|d| { d.connected = true; d.state = DeviceState::Connected; });
         if le {
             self.smp.attach(handle, id);
-            self.gatt.attach(handle, id);
+           let _ = self.gatt.attach(handle, id);
             // re-encrypt using the stored LTK if we have an LE bond
             if self.bonds.get(&id).and_then(|b| b.le_ltk).is_some() {
                 let smp = self.smp.clone();
@@ -201,7 +201,7 @@ impl ConnectionManager {
         let Some(id) = self.by_handle.lock().unwrap().remove(&handle) else { return };
         self.conns.lock().unwrap().remove(&id);
         self.l2.cleanup_handle(handle);   // notifies L2CAP channel consumers (HID etc.)
-        self.profiles.disconnect(&id);
+       let _ = self.profiles.disconnect(&id);
         self.smp.detach(handle);
         self.gatt.detach(handle);
         self.devices.lock().unwrap().get_mut(&id).map(|d| { d.connected = false; d.state = DeviceState::Disconnected; });
