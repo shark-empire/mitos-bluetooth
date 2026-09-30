@@ -60,11 +60,11 @@ impl<'de> Deserialize<'de> for Address {
 }
 use std::fmt;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AddressType { Bredr, LePublic, LeRandom }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct DeviceId { pub address: Address, #[serde(rename = "type")] pub address_type: AddressType }
 
 impl fmt::Display for DeviceId {

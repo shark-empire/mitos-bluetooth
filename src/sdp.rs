@@ -22,7 +22,7 @@ pub fn parse_de(b: &[u8], i: &mut usize) -> Result<De> {
     if *i >= b.len() { return Err(Error::Sdp("truncated data element".into())); }
     let h = b[*i]; *i += 1;
     let ty = h >> 3; let sz = h & 7;
-    let (len, extra) = match sz {
+    let (len, _extra) = match sz {
         0 => (1usize, 0usize), 1 => (2, 0), 2 => (4, 0), 3 => (8, 0), 4 => (16, 0),
         5 => { *i += 1; (b.get(*i - 1).copied().unwrap_or(0) as usize, 1) }
         6 => { let l = u16::from_be_bytes([*b.get(*i).unwrap_or(&0), *b.get(*i + 1).unwrap_or(&0)]) as usize; *i += 2; (l, 2) }
@@ -130,7 +130,7 @@ impl SdpClient {
             let val = &pairs[k + 1];
             k += 2;
             match id {
-                0x0001 => { if let De::Seq(items) = val { for it in items { if let De::Uuid(u) = it { svc.service_classes.push(u as u16); } } } }
+                0x0001 => { if let De::Seq(items) = val { for it in items { if let De::Uuid(u) = it { svc.service_classes.push(*u as u16); } } } }
                 0x0004 => {
                     if let De::Seq(layers) = val {
                         for layer in layers {
@@ -138,8 +138,8 @@ impl SdpClient {
                             let mut it = parts.iter();
                             let uuid = match it.next() { Some(De::Uuid(u)) => *u as u16, _ => continue };
                             match uuid {
-                                0x0100 => { if let Some(De::U(p)) = it.next() { if svc.psm.is_none() { svc.psm = Some(p as u16); } } }
-                                0x0003 => { if let Some(De::U(c)) = it.next() { if svc.rfcomm_channel.is_none() { svc.rfcomm_channel = Some(c as u8); } } }
+                                0x0100 => { if let Some(De::U(p)) = it.next() { if svc.psm.is_none() { svc.psm = Some(*p as u16); } } }
+                                0x0003 => { if let Some(De::U(c)) = it.next() { if svc.rfcomm_channel.is_none() { svc.rfcomm_channel = Some(*c as u8); } } }
                                 _ => {}
                             }
                         }

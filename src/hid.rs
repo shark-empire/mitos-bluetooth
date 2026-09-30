@@ -47,7 +47,7 @@ pub struct ReportFormat {
     pub fields: Vec<HidField>,
 }
 
-fn push_field(out: &mut Vec<ReportFormat>, rid: Option<u8>, kind: u8, flags: u8, f: HidField) {
+fn push_field(out: &mut Vec<ReportFormat>, rid: Option<u8>, kind: u8, f: HidField) {
     if let Some(fmt) = out.iter_mut().find(|x| x.report_id == rid && x.kind == kind) {
         fmt.fields.push(f);
     } else {
@@ -104,7 +104,7 @@ pub fn parse_descriptor(d: &[u8]) -> Vec<ReportFormat> {
                     logical_min: lmin, logical_max: lmax,
                     kind, flags: raw as u8,
                 };
-                push_field(&mut out, rid, kind, raw as u8, f);
+                push_field(&mut out, rid, kind, f);
             }
             0xA0 | 0xC0 => { usages.clear(); umin = None; umax = None; }  // (End) Collection clears locals
             _ => {}                                                       // physical/unit/push/pop ignored

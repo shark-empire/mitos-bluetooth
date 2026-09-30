@@ -1,12 +1,12 @@
-use crate::bonding::{Bond, BondStore};
-use crate::device::{now_ts, DeviceId};
+use crate::bonding::BondStore;
+use crate::device::DeviceId;
 use crate::error::{Error, Result};
 use crate::events::{Event, EventBus, PairingMethod, PairingRequest};
 use crate::hci::{ev, op, HciClient, HciEvent};
 use crate::l2cap::{L2cap, CID_SMP};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -193,7 +193,7 @@ impl Smp {
         p.extend_from_slice(&bond.le_ediv.to_le_bytes());
         p.extend_from_slice(&ltk);
         self.hci.command_status(op::LE_START_ENCRYPTION, &p)?;
-        match self.hci.wait_event(|e| e.code == ev::ENCRYPTION_CHANGE && e.u16(1) == handle, Duration::from_secs(5)) {
+        match self.hci.wait_event(move |e| e.code == ev::ENCRYPTION_CHANGE && e.u16(1) == handle, Duration::from_secs(5)) {
             Ok(e) if e.u8(0) == 0 => Ok(()),
             Ok(e) => Err(Error::PairingFailed(format!("encryption failed: status {}", e.u8(0)))),
             Err(e) => Err(e),
@@ -406,9 +406,6 @@ impl Smp {
         }
     }
 }
-
-use crate::l2cap::L2Packet;
-use std::sync::mpsc::channel;
 
 fn rand16() -> [u8; 16] {
     let mut b = [0u8; 16];

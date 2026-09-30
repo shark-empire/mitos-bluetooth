@@ -1,6 +1,6 @@
 use crate::device::Address;
-use crate::error::{Error, Result};
-use crate::hci::{op, HciClient, HciTransport};
+use crate::error::Result;
+use crate::hci::{op, HciClient};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -86,7 +86,8 @@ impl BluetoothAdapter {
 
     pub fn set_scan(&self, discoverable: bool, connectable: bool) -> Result<()> {
         let scan = (if discoverable { 1 } else { 0 }) | (if connectable { 2 } else { 0 });
-        self.hci.command(op::WRITE_SCAN_ENABLE, &[scan])
+        self.hci.command(op::WRITE_SCAN_ENABLE, &[scan])?;
+        Ok(())
     }
     pub fn set_name(&self, name: &str) -> Result<()> {
         let mut n = [0u8; 248];
@@ -98,7 +99,8 @@ impl BluetoothAdapter {
         eir.push(namelen + 1); eir.push(0x09); eir.extend_from_slice(&nb[..namelen as usize]);
         eir.resize(1 + 240, 0);
         let mut e = vec![0x00]; e.extend_from_slice(&eir);
-        self.hci.command(op::WRITE_EXTENDED_INQUIRY_RESPONSE, &e)
+        self.hci.command(op::WRITE_EXTENDED_INQUIRY_RESPONSE, &e)?;
+        Ok(())
     }
     pub fn off(&self) -> Result<()> {
         let _ = self.hci.command(op::WRITE_SCAN_ENABLE, &[0x00]);

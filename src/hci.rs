@@ -2,7 +2,7 @@ use crate::device::Address;
 use crate::error::{Error, Result};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -152,7 +152,7 @@ impl HciTransport for LinuxHciSocket {
         if n < 0 {
             let e = std::io::Error::last_os_error();
             return Err(match e.raw_os_error() {
-                Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) | Some(libc::EINTR) => Error::Timeout("hci recv"),
+                Some(libc::EAGAIN) | Some(libc::EINTR) => Error::Timeout("hci recv"), // EWOULDBLOCK == EAGAIN on Linux
                 _ => Error::Io(e),
             });
         }
@@ -241,7 +241,7 @@ impl SerialH4 {
 impl HciTransport for SerialH4 {
     fn send_packet(&mut self, packet: &[u8]) -> Result<()> {
         self.writer.write_all(packet)?;
-        self.writer.flush()
+        Ok(self.writer.flush()?)
     }
     fn recv_packet(&mut self, out: &mut Vec<u8>) -> Result<usize> {
         // H4 stream framing: [type][hdr][len][body]
@@ -672,7 +672,7 @@ fn mock_ev(code: u8, params: &[u8]) -> Vec<u8> {
 }
 
 fn mock_on_command(st: &mut MockState, opcode: u16, params: &[u8]) {
-    let addr_param = params.get(0..6).map(<[u8; 6]>::try_from).and_then(Result::ok);
+    let addr_param = params.get(0..6).map(<[u8; 6]>::try_from).and_then(|r| r.ok());
     let t = |ms: u64| Instant::now() + Duration::from_millis(ms);
 
     // 1. immediate completion

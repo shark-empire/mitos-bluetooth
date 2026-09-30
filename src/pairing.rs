@@ -1,5 +1,5 @@
 use crate::bonding::BondStore;
-use crate::device::{Device, DeviceId, DeviceTable};
+use crate::device::{DeviceId, DeviceTable};
 use crate::error::{Error, Result};
 use crate::events::{Event, EventBus, PairingMethod, PairingRequest};
 use crate::hci::{ev, op, HciClient, HciEvent};
@@ -174,8 +174,9 @@ impl PairingManager {
     pub fn confirm(&self, device: &DeviceId, accept: bool) -> Result<()> {
         let addr = device.address;
         self.pending.lock().unwrap().remove(device);
-        if accept { self.hci.command(op::USER_CONFIRMATION_REQUEST_REPLY, &addr.0) }
-        else { self.hci.command(op::USER_CONFIRMATION_REQUEST_NEG_REPLY, &addr.0) }
+        let reply_op = if accept { op::USER_CONFIRMATION_REQUEST_REPLY } else { op::USER_CONFIRMATION_REQUEST_NEG_REPLY };
+        self.hci.command(reply_op, &addr.0)?;
+        Ok(())
     }
     pub fn provide_pin(&self, device: &DeviceId, pin: &str) -> Result<()> {
         if pin.is_empty() || pin.len() > 16 { return Err(Error::InvalidArgument("pin must be 1..=16 bytes".into())); }
@@ -186,7 +187,8 @@ impl PairingManager {
         let mut b = pin.as_bytes().to_vec();
         b.resize(16, 0);
         p.extend_from_slice(&b);
-        self.hci.command(op::PIN_CODE_REQUEST_REPLY, &p)
+        self.hci.command(op::PIN_CODE_REQUEST_REPLY, &p)?;
+        Ok(())
     }
     pub fn provide_passkey(&self, device: &DeviceId, passkey: u32) -> Result<()> {
         if passkey > 999_999 { return Err(Error::InvalidArgument("passkey out of range".into())); }
@@ -194,7 +196,8 @@ impl PairingManager {
         self.pending.lock().unwrap().remove(device);
         let mut p = addr.0.to_vec();
         p.extend_from_slice(&passkey.to_le_bytes());
-        self.hci.command(op::USER_PASSKEY_REQUEST_REPLY, &p)
+        self.hci.command(op::USER_PASSKEY_REQUEST_REPLY, &p)?;
+        Ok(())
     }
     pub fn cancel(&self, device: &DeviceId) -> Result<()> {
         let addr = device.address;

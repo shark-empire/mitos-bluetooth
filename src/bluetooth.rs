@@ -42,7 +42,7 @@ impl AdapterRuntime {
     pub fn open(index: u32, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
         let adapter = BluetoothAdapter::open(index)?;
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
-        Self::build(index, adapter.hci.clone(), info, bus, bonds)
+        Ok(Self::build(index, adapter.hci.clone(), info, bus, bonds))
     }
     /// Open an adapter with an explicit transport — used by tests, serial, and a
     /// future mitos-kernel driver (implement `HciTransport`, pass it here).
@@ -51,7 +51,7 @@ impl AdapterRuntime {
         let hci = Arc::new(crate::hci::HciClient::open(index, transport)?);
         let adapter = BluetoothAdapter { hci: hci.clone() };
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
-        Self::build(index, hci, info, bus, bonds)
+        Ok(Self::build(index, hci, info, bus, bonds))
     }
 
     pub fn open_serial(index: u32, path: &str, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
@@ -59,7 +59,7 @@ impl AdapterRuntime {
         let hci = Arc::new(HciClient::open(index, Box::new(tr))?);
         let adapter = BluetoothAdapter { hci: hci.clone() };
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
-        Self::build(index, hci, info, bus, bonds)
+        Ok(Self::build(index, hci, info, bus, bonds))
     }
 
     fn build(index: u32, hci: Arc<HciClient>, info: AdapterInfo, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Arc<Self> {
@@ -154,7 +154,7 @@ impl BluetoothManager {
         let store = Arc::new(Storage::new(data_dir)?);
         let cfg = store.load_config();
         let bonds = Arc::new(BondStore::new(store.clone()));
-        Ok(Arc::new(BluetoothManager { bus: EventBus::new(), store, bonds, cfg: Mutex::new(cfg),
+        Ok(Arc::new(BluetoothManager { bus: Arc::new(EventBus::new()), store, bonds, cfg: Mutex::new(cfg),
                                        adapters: Mutex::new(HashMap::new()), state: Mutex::new(BluetoothState::Off),
                                        pair_timeout: Duration::from_secs(120) }))
     }

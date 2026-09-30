@@ -193,7 +193,7 @@ impl GattManager {
         let mut services = Vec::new();
         let mut start: u16 = 0x0001;
         loop {
-            let params = [start.to_le_bytes(), 0xFFFFu16.to_le_bytes(), 0x00, 0x28].concat();
+            let params = [start.to_le_bytes(), 0xFFFFu16.to_le_bytes(), [0x00, 0x28]].concat(); // 0x2800 Primary Service, LE
             match self.request(conn, att::READ_BY_GROUP_REQ, &params) {
                 Ok(data) => {
                     let item_len = *data.first().unwrap_or(&0) as usize;
@@ -230,7 +230,7 @@ impl GattManager {
         let mut chars: Vec<GattCharacteristic> = Vec::new();
         let mut start = service.start.max(1);
         loop {
-            let params = [start.to_le_bytes(), service.end.to_le_bytes(), 0x03, 0x28].concat();
+            let params = [start.to_le_bytes(), service.end.to_le_bytes(), [0x03, 0x28]].concat(); // 0x2803 Characteristic, LE
             match self.request(conn, att::READ_BY_TYPE_REQ, &params) {
                 Ok(data) => {
                     let item_len = *data.first().unwrap_or(&0) as usize;
@@ -301,7 +301,7 @@ impl GattManager {
         let mtu = self.st.lock().unwrap().get(&conn).map(|c| c.mtu).unwrap_or(23) as usize;
         let mut out = self.request(conn, att::READ_REQ, &attr.to_le_bytes())?;
         while out.len() >= mtu.saturating_sub(1) && out.len() < 512 {
-            let params = [&attr.to_le_bytes(), &(out.len() as u16).to_le_bytes()].concat();
+            let params = [attr.to_le_bytes(), (out.len() as u16).to_le_bytes()].concat();
             match self.request(conn, att::READ_BLOB_REQ, &params) {
                 Ok(d) if !d.is_empty() => {
                     let n = d.len();

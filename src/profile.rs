@@ -6,7 +6,7 @@ use crate::hid::HidHost;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProfileKind { Hid, A2dp, Avrcp, Hfp, Hsp, Gatt }
 
