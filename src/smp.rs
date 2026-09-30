@@ -209,7 +209,9 @@ impl Smp {
             let c = st.get_mut(&handle).ok_or_else(|| Error::InvalidState("smp not attached".into()))?;
             c.state.preq = preq; c.state.stage = 1;
         }
-        self.l2.send_fixed(handle, CID_SMP, &[&[0x01], &preq].concat())?;
+        let mut msg = vec![0x01];
+        msg.extend_from_slice(&preq);
+        self.l2.send_fixed(handle, CID_SMP, &msg)?;
         let _ = dev;
         Ok(())
     }
