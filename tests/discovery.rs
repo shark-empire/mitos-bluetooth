@@ -14,7 +14,8 @@ fn temp_mgr(tag: &str) -> (Arc<BluetoothManager>, Arc<std::sync::Mutex<mitos_blu
     (mgr, shared)
 }
 
-fn wait_event<T>(rx: &mitos_bluetooth::events::EventBus, secs: u64, mut f: impl FnMut(Event) -> Option<T>) -> Option<T> {
+
+fn wait_event<T>(rx: &std::sync::mpsc::Receiver<Event>, secs: u64, mut f: impl FnMut(Event) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
         if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100)) {
@@ -40,8 +41,8 @@ fn inquiry_produces_device_found() {
     let id = d.id;
     assert!(mgr.devices(0).unwrap().iter().any(|d| d.id == id));
     // inquiry completes -> DiscoveryStopped
-    assert!(wait_event(&rx, 5, |ev| matches!(ev, Event::DiscoveryStopped { .. })).is_some());
-}
+    assert!(wait_event(&rx, 5, |ev| matches!(ev, Event::DiscoveryStopped { .. }).then_some(())).is_some());
+    }
 
 #[test]
 fn inquiry_result_without_eir_resolves_name_in_background() {
