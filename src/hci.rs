@@ -697,6 +697,7 @@ fn mock_on_command(st: &mut MockState, opcode: u16, params: &[u8]) {
         op::SET_CONNECTION_ENCRYPTION, op::LE_CREATE_CONNECTION, op::LE_CREATE_CONNECTION_CANCEL,
         op::LE_START_ENCRYPTION, op::SETUP_SYNCHRONOUS_CONNECTION, op::ACCEPT_SYNCHRONOUS_CONNECTION,
         op::REJECT_SYNCHRONOUS_CONNECTION,
+        op::READ_REMOTE_SUPPORTED_FEATURES,
     ];
     if status_cmds.contains(&opcode) {
         st.outbox.push_back((t(0), mock_cs(opcode)));
@@ -779,7 +780,16 @@ fn mock_on_command(st: &mut MockState, opcode: u16, params: &[u8]) {
                 let mut name = b"Mock Keyboard\0".to_vec();
                 name.resize(248, 0);
                 p.extend_from_slice(&name);
-                st.outbox.push_back((t(50), mock_ev(0x07, &p)));
+                st.outbox.push_back((t(50), mock_ev(0x07, &p))); 
+             }
+          }
+      op::READ_REMOTE_SUPPORTED_FEATURES => {
+            if params.len() >= 2 {
+                let handle = u16::from_le_bytes([params[0], params[1]]);
+                let mut p = vec![0x00]; // status = success
+                p.extend_from_slice(&handle.to_le_bytes());
+                p.extend_from_slice(&[0xBF, 0xFF, 0xFE, 0x02, 0x00, 0x00, 0x00, 0x00]); // feature bitmask
+                st.outbox.push_back((t(50), mock_ev(ev::READ_REMOTE_SUPPORTED_FEATURES_COMPLETE, &p)));
             }
         }
         op::INQUIRY => {
