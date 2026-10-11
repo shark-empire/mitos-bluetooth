@@ -1,14 +1,14 @@
 use crate::adapter::{AdapterInfo, BluetoothAdapter, BluetoothState};
 use crate::audio::AudioManager;
 use crate::bonding::{Bond, BondStore};
-use crate::connection::{ConnInfo, ConnectionManager};
+use crate::connection::{ConnInfo, ConnectionDeps, ConnectionManager};
 use crate::device::{AddressType, Device, DeviceClass, DeviceId, DeviceState, DeviceTable};
 use crate::discovery::DiscoveryManager;
 use crate::error::{Error, Result};
 use crate::events::{Event, EventBus};
 use crate::gatt::GattManager;
 use crate::hid::HidHost;
-use crate::hci::{list_linux_adapters, HciClient, SerialH4};
+use crate::hci::{ev, list_linux_adapters, HciClient, HciEvent, SerialH4};
 use crate::l2cap::L2cap;
 use crate::pairing::PairingManager;
 use crate::profile::{ProfileKind, ProfileManager};
@@ -36,13 +36,15 @@ pub struct AdapterRuntime {
     pub pairing: PairingManager,
     pub connections: ConnectionManager,
     pub info: Mutex<AdapterInfo>,
+    /// `trusted_only_connect` from the configuration: unbonded devices may connect only while discoverable.
+    trusted_only: bool,
 }
 
 impl AdapterRuntime {
     pub fn open(index: u32, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
         let adapter = BluetoothAdapter::open(index)?;
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
-        Ok(Self::build(index, adapter.hci.clone(), info, bus, bonds))
+        Ok(Self::build(index, adapter.hci.clone(), info, cfg, bus, bonds))
     }
     /// Open an adapter with an explicit transport — used by tests, serial, and a
     /// future mitos-kernel driver (implement `HciTransport`, pass it here).
@@ -51,7 +53,7 @@ impl AdapterRuntime {
         let hci = Arc::new(crate::hci::HciClient::open(index, transport)?);
         let adapter = BluetoothAdapter { hci: hci.clone() };
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
-        Ok(Self::build(index, hci, info, bus, bonds))
+        Ok(Self::build(index, hci, info, cfg, bus, bonds))
     }
 
     pub fn open_serial(index: u32, path: &str, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
@@ -59,20 +61,31 @@ impl AdapterRuntime {
         let hci = Arc::new(HciClient::open(index, Box::new(tr))?);
         let adapter = BluetoothAdapter { hci: hci.clone() };
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
-        Ok(Self::build(index, hci, info, bus, bonds))
+        Ok(Self::build(index, hci, info, cfg, bus, bonds))
     }
 
-    fn build(index: u32, hci: Arc<HciClient>, info: AdapterInfo, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Arc<Self> {
+    fn build(index: u32, hci: Arc<HciClient>, info: AdapterInfo, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Arc<Self> {
         let l2 = L2cap::new(hci.clone());
         let devices: Arc<DeviceTable> = Arc::new(Mutex::new(HashMap::new()));
-        let smp = Smp::new(l2.clone(), hci.clone(), bus.clone(), bonds.clone());
+        let smp = Smp::new(l2.clone(), hci.clone(), bus.clone(), bonds.clone(), info.address);
         let gatt = GattManager::new(l2.clone(), bus.clone(), devices.clone());
         let hid = HidHost::new(l2.clone(), gatt.clone(), devices.clone(), bus.clone());
         let audio = AudioManager::new(hci.clone(), l2.clone(), devices.clone(), bus.clone());
         let profiles = Arc::new(ProfileManager::new(hid.clone(), gatt.clone(), audio.clone()));
-        let connections = ConnectionManager::new(hci.clone(), l2.clone(), smp.clone(), gatt.clone(),
-                                                 profiles.clone(), devices.clone(), bus.clone(), bonds.clone());
-        let pairing = PairingManager::new(hci.clone(), devices.clone(), bus.clone(), bonds.clone());
+        let connections = ConnectionManager::new(
+            ConnectionDeps {
+                hci: hci.clone(),
+                l2: l2.clone(),
+                smp: smp.clone(),
+                gatt: gatt.clone(),
+                profiles: profiles.clone(),
+                devices: devices.clone(),
+                bus: bus.clone(),
+                bonds: bonds.clone(),
+            },
+            cfg.trusted_only_connect && !info.discoverable,
+        );
+        let pairing = PairingManager::new(hci.clone(), devices.clone(), bus.clone(), bonds.clone(), cfg.auto_pin, cfg.default_pin.clone());
         let discovery = DiscoveryManager::new(hci.clone(), devices.clone(), bus.clone(), index);
         // seed the device table from the bond database so the GUI sees paired devices after boot
         {
@@ -88,40 +101,60 @@ impl AdapterRuntime {
                 ds.entry(b.device).or_insert(d);
             }
         }
-        let rt = Arc::new(AdapterRuntime { index, hci, l2, smp, gatt, hid, audio, profiles, devices,
-                                           bus, bonds, discovery, pairing, connections, info: Mutex::new(info) });
+        let rt = Arc::new(AdapterRuntime {
+            index, hci, l2, smp, gatt, hid, audio, profiles, devices, bus, bonds, discovery, pairing, connections,
+            info: Mutex::new(info),
+            trusted_only: cfg.trusted_only_connect,
+        });
         // All manager work runs on a dedicated dispatch thread. The HCI reader thread only
         // forwards events into this channel — it must never block, or command-complete
         // delivery would deadlock (manager handlers issue HCI commands).
-        let (tx, rx) = mpsc::channel::<crate::hci::HciEvent>();
-        rt.hci.set_event_handler(Box::new(move |ev| { let _ = tx.send(ev); }));
-        let rt2 = rt.clone();
+        // The thread holds only a Weak reference, so dropping the runtime releases the controller.
+        let (tx, rx) = mpsc::channel::<HciEvent>();
+        rt.hci.set_event_handler(Box::new(move |event| { let _ = tx.send(event); }));
+        let weak = Arc::downgrade(&rt);
         std::thread::Builder::new().name(format!("hci{index}-dispatch")).spawn(move || {
-            while let Ok(ev) = rx.recv() { rt2.dispatch(&ev); }
+            while let Ok(event) = rx.recv() {
+                match weak.upgrade() {
+                    Some(rt) => rt.dispatch(&event),
+                    None => break,
+                }
+            }
         }).ok();
         rt
     }
 
-    fn dispatch(&self, ev: &crate::hci::HciEvent) {
-        self.connections.on_event(ev); // first: keeps handle maps current for the others
-        self.discovery.on_event(ev);
-        self.pairing.on_event(ev);
-        if ev.code == crate::hci::ev::LE_META_EVENT && ev.le_sub() == crate::hci::ev::LE_LTK_REQUEST {
-            self.smp.on_ltk_request(ev);
-        }
-        if ev.code == crate::hci::ev::SYNCHRONOUS_CONNECTION_COMPLETE {
-            self.audio.on_sco_complete(ev);
+    fn dispatch(&self, event: &HciEvent) {
+        self.connections.on_event(event); // first: keeps handle maps current for the others
+        self.discovery.on_event(event);
+        self.pairing.on_event(event);
+        match event.code {
+            ev::AUTHENTICATION_COMPLETE => {
+                let device = self.connections.device_of(event.u16(1));
+                self.pairing.on_auth_complete(device, event.u8(0));
+            }
+            ev::ENCRYPTION_CHANGE => self.smp.on_encryption_change(event.u16(1), event.u8(0), event.u8(3) != 0),
+            ev::LE_META_EVENT if event.le_sub() == ev::LE_LTK_REQUEST => self.smp.on_ltk_request(event),
+            ev::SYNCHRONOUS_CONNECTION_COMPLETE => self.audio.on_sco_complete(event),
+            _ => {}
         }
     }
 
+    /// Orderly shutdown: stop scanning, hang up, stop the media sockets, then release the controller so the
+    /// kernel (or the next power_on) can have it again.
     pub fn power_off(&self) -> Result<()> {
-        let _ = BluetoothAdapter { hci: self.hci.clone() }.set_scan(false, false);
-        self.hci.shutdown();
+        let _ = self.discovery.stop();
+        self.connections.disconnect_all();
+        self.audio.shutdown();
+        let _ = BluetoothAdapter { hci: self.hci.clone() }.off();
+        self.l2.shutdown();
         Ok(())
     }
 
     pub fn set_discoverable(&self, on: bool) -> Result<()> {
         BluetoothAdapter { hci: self.hci.clone() }.set_scan(on, true)?;
+        // while discoverable a brand-new device must be able to connect, whatever `trusted_only_connect` says
+        self.connections.set_accept_unbonded(on || !self.trusted_only);
         let mut i = self.info.lock().unwrap();
         i.discoverable = on;
         let snapshot = i.clone();
@@ -312,31 +345,48 @@ impl BluetoothManager {
     pub fn pair(&self, index: u32, id: &DeviceId) -> Result<()> {
         let rt = self.runtime(index)?;
         let rx = self.bus.subscribe(); // subscribe BEFORE triggering anything
-        {
-            let mut ds = rt.devices.lock().unwrap();
-            let d = ds.entry(*id).or_insert_with(|| Device::new(*id));
-            d.state = DeviceState::Pairing;
+        rt.devices.lock().unwrap().entry(*id).or_insert_with(|| Device::new(*id)).state = DeviceState::Pairing;
+        let result = self.pair_inner(&rt, id, &rx);
+        let state = match (&result, self.bonds.is_bonded(id)) {
+            (Ok(()), _) | (Err(_), true) => DeviceState::Paired,
+            (Err(_), false) => DeviceState::Discovered,
+        };
+        if let Some(d) = rt.devices.lock().unwrap().get_mut(id) {
+            d.state = state;
         }
+        result
+    }
+
+    fn pair_inner(&self, rt: &AdapterRuntime, id: &DeviceId, rx: &mpsc::Receiver<Event>) -> Result<()> {
         let bonded = self.bonds.is_bonded(id);
         let handle = rt.connections.connect_acl(id, Duration::from_secs(15))?;
-        if bonded { return Ok(()); }
         if id.address_type == AddressType::Bredr {
+            if bonded {
+                // already paired: authenticate with the stored link key instead of pairing again
+                return rt.pairing.authenticate(handle, Duration::from_secs(15));
+            }
             rt.pairing.request_auth(handle)?;
+        } else if bonded {
+            return rt.smp.encrypt_bond(handle);
         } else if !rt.smp.busy(handle) {
             rt.smp.start_pairing(handle, true)?;
         }
         let deadline = Instant::now() + self.pair_timeout;
         loop {
             let remain = deadline.saturating_duration_since(Instant::now());
-            if remain.is_zero() { break; }
+            if remain.is_zero() {
+                break;
+            }
             match rx.recv_timeout(remain) {
-                Ok(Event::PairingComplete { id: ref dev, success, .. }) if dev == id => {
-                    rt.devices.lock().unwrap().get_mut(id)
-                        .map(|d| d.state = if success { DeviceState::Paired } else { DeviceState::Discovered });
-                    if !success { return Err(Error::PairingFailed("pairing rejected or failed".into())); }
+                Ok(Event::PairingComplete { id: dev, success, error }) if dev == *id => {
+                    if !success {
+                        return Err(Error::PairingFailed(error.unwrap_or_else(|| "pairing rejected or failed".into())));
+                    }
                     if let Some(d) = rt.devices.lock().unwrap().get(id) {
                         self.bonds.set_class(id, d.properties.class.0);
-                        if let Some(n) = &d.properties.name { self.bonds.set_name(id, n); }
+                        if let Some(n) = &d.properties.name {
+                            self.bonds.set_name(id, n);
+                        }
                     }
                     return Ok(());
                 }
@@ -344,14 +394,23 @@ impl BluetoothManager {
                 Err(_) => break,
             }
         }
+        if id.address_type != AddressType::Bredr {
+            rt.smp.cancel(handle); // tell the peer and drop the half-finished exchange
+        }
         Err(Error::Timeout("pairing completion"))
     }
 
     pub fn pairing_confirm(&self, index: u32, id: &DeviceId, accept: bool) -> Result<()> {
         let rt = self.runtime(index)?;
-        if id.address_type == AddressType::Bredr { rt.pairing.confirm(id, accept) }
-        else if accept { Ok(()) } // LE legacy pairing auto-continues
-        else { rt.pairing.cancel(id) }
+        if id.address_type == AddressType::Bredr {
+            rt.pairing.confirm(id, accept)
+        } else {
+            // LE legacy pairing continues by itself; declining ends it
+            if !accept {
+                rt.smp.cancel_device(id);
+            }
+            Ok(())
+        }
     }
     pub fn provide_pin(&self, index: u32, id: &DeviceId, pin: &str) -> Result<()> {
         self.runtime(index)?.pairing.provide_pin(id, pin)
@@ -362,7 +421,9 @@ impl BluetoothManager {
         else { rt.smp.provide_passkey(id, passkey) }
     }
     pub fn cancel_pairing(&self, index: u32, id: &DeviceId) -> Result<()> {
-        self.runtime(index)?.pairing.cancel(id)
+        let rt = self.runtime(index)?;
+        rt.smp.cancel_device(id);
+        rt.pairing.cancel(id)
     }
 
     // ---- connections / profiles ----
@@ -371,6 +432,14 @@ impl BluetoothManager {
     }
     pub fn disconnect(&self, index: u32, id: &DeviceId) -> Result<()> {
         self.runtime(index)?.connections.disconnect(id, 0x13)
+    }
+    /// Bring the link back up (with retries) after it dropped.
+    pub fn reconnect(&self, index: u32, id: &DeviceId) -> Result<()> {
+        self.runtime(index)?.connections.reconnect(id).map(|_| ())
+    }
+    /// Keyboard LEDs: numlock 0x01, caps 0x02, scroll 0x04.
+    pub fn set_keyboard_leds(&self, index: u32, id: &DeviceId, leds: u8) -> Result<()> {
+        self.runtime(index)?.hid.set_keyboard_leds(id, leds)
     }
     pub fn connections(&self, index: u32) -> Result<Vec<ConnInfo>> {
         Ok(self.runtime(index)?.connections.list())

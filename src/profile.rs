@@ -29,7 +29,7 @@ pub fn uuid16_profile(u: u16) -> Option<ProfileKind> {
     match u {
         0x1108 | 0x1112 => Some(ProfileKind::Hsp),                          // Headset / Headset-AG
         0x110a | 0x110b => Some(ProfileKind::A2dp),                          // A2DP source / sink
-        0x110c | 0x110d | 0x110e | 0x110f => Some(ProfileKind::Avrcp),       // AVRCP
+        0x110c..=0x110f => Some(ProfileKind::Avrcp),                        // AVRCP
         0x111e | 0x111f => Some(ProfileKind::Hfp),                           // Handsfree
         0x1124 | 0x1812 => Some(ProfileKind::Hid),                           // HID / HID-over-GATT
         _ => None,

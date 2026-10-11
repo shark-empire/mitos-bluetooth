@@ -2,7 +2,7 @@ use crate::adapter::BluetoothState;
 use crate::device::{Device, DeviceId};
 use crate::profile::ProfileKind;
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,18 +54,29 @@ pub enum Event {
     A2dpStreamReady { id: DeviceId, socket_path: String },
 }
 
+/// Per-subscriber queue depth. A subscriber that stops reading misses new events instead of
+/// making the daemon's memory grow without bound.
+const SUBSCRIBER_QUEUE: usize = 1024;
+
 #[derive(Clone, Default)]
-pub struct EventBus { subs: Arc<Mutex<Vec<Sender<Event>>>> }
+pub struct EventBus {
+    subs: Arc<Mutex<Vec<SyncSender<Event>>>>,
+}
 
 impl EventBus {
-    pub fn new() -> Self { EventBus { subs: Arc::new(Mutex::new(Vec::new())) } }
+    pub fn new() -> Self {
+        EventBus { subs: Arc::new(Mutex::new(Vec::new())) }
+    }
+
     pub fn subscribe(&self) -> Receiver<Event> {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
         self.subs.lock().unwrap().push(tx);
         rx
     }
+
+    /// Never blocks: a full queue drops the event for that subscriber, a closed one unsubscribes it.
     pub fn publish(&self, ev: Event) {
-        let mut s = self.subs.lock().unwrap();
-        s.retain(|tx| tx.send(ev.clone()).is_ok());
+        let mut subs = self.subs.lock().unwrap();
+        subs.retain(|tx| !matches!(tx.try_send(ev.clone()), Err(TrySendError::Disconnected(_))));
     }
 }

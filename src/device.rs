@@ -13,7 +13,7 @@ pub fn now_ts() -> u64 {
 pub fn to_hex(b: &[u8]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
 pub fn from_hex(s: &str) -> Result<Vec<u8>> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if s.len() % 2 != 0 { return Err(Error::InvalidArgument("odd hex length".into())); }
+    if !s.len().is_multiple_of(2) { return Err(Error::InvalidArgument("odd hex length".into())); }
     let mut v = Vec::with_capacity(s.len() / 2);
     let b = s.as_bytes();
     for i in (0..b.len()).step_by(2) {
@@ -158,7 +158,13 @@ impl Device {
     pub fn apply_ad(&mut self, ad: &EirData, rssi: i8) -> bool {
         let mut changed = false;
         self.last_seen = now_ts();
-        if self.properties.rssi != Some(rssi) { self.properties.rssi = Some(rssi); changed = true; }
+        // RSSI jitters on every advertisement: only surface changes of 6 dB or more
+        let big_move = match self.properties.rssi {
+            Some(old) => (i16::from(old) - i16::from(rssi)).abs() >= 6,
+            None => true,
+        };
+        self.properties.rssi = Some(rssi);
+        if big_move { changed = true; }
         if let Some(n) = &ad.name { if ad.complete_name && self.properties.name.as_deref() != Some(n.as_str()) { self.properties.name = Some(n.clone()); changed = true; } }
         else if let Some(n) = &ad.short_name { if self.properties.name.is_none() { self.properties.name = Some(n.clone()); changed = true; } }
         if ad.class_of_device != 0 && self.properties.class.0 != ad.class_of_device { self.properties.class = DeviceClass(ad.class_of_device); changed = true; }
@@ -199,7 +205,7 @@ pub fn parse_eir(data: &[u8]) -> EirData {
         let d = &data[i + 2..i + 1 + len];
         match t {
             0x01 if !d.is_empty() => out.flags = d[0],
-            0x02 | 0x03 | 0x04 | 0x05 => for c in d.chunks(2) { if c.len() == 2 { out.uuids16.push(u16::from_le_bytes([c[0], c[1]])); } },
+            0x02..=0x05 => for c in d.chunks(2) { if c.len() == 2 { out.uuids16.push(u16::from_le_bytes([c[0], c[1]])); } },
             0x06 | 0x07 => for c in d.chunks(16) { if c.len() == 16 { out.uuids128.push(uuid128_str(c)); } },
             0x08 => out.short_name = Some(String::from_utf8_lossy(d).trim_end_matches('\0').to_string()),
             0x09 => { out.name = Some(String::from_utf8_lossy(d).trim_end_matches('\0').to_string()); out.complete_name = true; }

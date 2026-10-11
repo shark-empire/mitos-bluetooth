@@ -4,13 +4,16 @@ use crate::error::{Error, Result};
 use crate::events::{Event, EventBus};
 use crate::profile::ProfileKind;
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// A request line larger than this is refused and the client disconnected (bounds memory per client).
+const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 /// Line-delimited JSON over a Unix socket.
 ///   Request:  {"id": 1, "method": "start_discovery", "params": {...}}
@@ -59,9 +62,13 @@ fn handle_client(stream: UnixStream, mgr: Arc<BluetoothManager>, bus: Arc<EventB
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line) {
+        match (&mut reader).take(MAX_REQUEST_BYTES).read_line(&mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
+        }
+        if !line.ends_with('\n') && line.len() as u64 >= MAX_REQUEST_BYTES {
+            write_line(&out, &json!({"id": null, "ok": false, "error": "request too large"}));
+            break;
         }
         let req: Value = match serde_json::from_str(line.trim()) {
             Ok(v) => v,
@@ -161,6 +168,14 @@ fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value, privileged: bool) -
             json!(true)
         }
         "disconnect" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.disconnect(i, &id)?; json!(true) }
+        "reconnect" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.reconnect(i, &id)?; json!(true) }
+        "set_keyboard_leds" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            let leds = p.get("leds").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("leds (bitmask) required".into()))?;
+            mgr.set_keyboard_leds(i, &id, (leds & 0xff) as u8)?;
+            json!(true)
+        }
         "get_connections" => { let i = p_index(p)?; serde_json::to_value(mgr.connections(i)?)? }
         "set_trusted" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.set_trusted(&id, p_bool(p, "on"))?; json!(true) }
         "remove_device" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.remove_device(i, &id)?; json!(true) }

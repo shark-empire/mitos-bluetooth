@@ -9,8 +9,9 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const HID_SVC: u16 = 0x1124;        // SDP: classic HID service
 const HOGP_SVC: u16 = 0x1812;       // GATT: HID over GATT service
@@ -21,6 +22,7 @@ const UUID_PROTOCOL_MODE: u16 = 0x2a4e;
 const UUID_REPORT_REF: u16 = 0x2908;
 const UUID_BOOT_KBD_IN: u16 = 0x2a22;
 const UUID_BOOT_MOUSE_IN: u16 = 0x2a33;
+const UUID_BOOT_KBD_OUT: u16 = 0x2a32;
 const HIDP_SET_PROTOCOL: u8 = 0x70; // |1 => report protocol
 const HIDP_SET_REPORT_OUT: u8 = 0x52;
 
@@ -83,7 +85,7 @@ pub fn parse_descriptor(d: &[u8]) -> Vec<ReportFormat> {
         } else { raw as i32 };
         i += n;
         match item & 0xFC {
-            0x04 | 0x05 | 0x06 | 0x07 => page = (raw & 0xffff) as u16,   // Usage Page
+            0x04 => page = (raw & 0xffff) as u16,                         // Usage Page
             0x14 => lmin = sval,                                          // Logical Minimum
             0x24 => lmax = sval,                                          // Logical Maximum
             0x74 => size = raw as u16,                                    // Report Size
@@ -249,6 +251,7 @@ struct HidSession {
     formats: Vec<ReportFormat>,            // report protocol (parsed descriptor)
     le_reports: HashMap<u16, u8>,          // GATT: value handle -> report id
     le_boot_kind: Option<u8>,              // GATT boot: 0 keyboard, 1 mouse
+    le_led: Option<(u16, u8)>,             // GATT: (value handle, properties) of the keyboard LED output report
 }
 
 pub struct HidHost {
@@ -269,22 +272,30 @@ impl HidHost {
         host.l2.register_listener(PSM_HID_CONTROL, tx11);
         host.l2.register_listener(PSM_HID_INTERRUPT, tx13);
         for (rx, is_control) in [(rx11, true), (rx13, false)] {
-            let h = host.clone();
+            let weak = Arc::downgrade(&host);
             std::thread::spawn(move || {
                 while let Ok(p) = rx.recv() {
                     if p.closed { continue; }
-                    h.on_inbound_channel(p.handle, p.cid, is_control);
+                    match weak.upgrade() {
+                        Some(h) => h.on_inbound_channel(p.handle, p.cid, is_control),
+                        None => break,
+                    }
                 }
             });
         }
-        // GATT notifications -> HID reports (HOGP)
-        let h = host.clone();
+        // GATT notifications -> HID reports (HOGP). Weak reference: the thread ends when the stack is dropped.
+        let weak = Arc::downgrade(&host);
         let evrx = host.bus.subscribe();
-        std::thread::spawn(move || {
-            while let Ok(ev) = evrx.recv() {
-                if let Event::GattNotification { id, attribute, value } = ev {
-                    h.on_gatt_report(&id, attribute, &value);
+        std::thread::spawn(move || loop {
+            match evrx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Event::GattNotification { id, attribute, value }) => match weak.upgrade() {
+                    Some(h) => h.on_gatt_report(&id, attribute, &value),
+                    None => break,
+                },
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {
+                    if weak.strong_count() == 0 { break; }
                 }
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         });
         host
@@ -328,7 +339,7 @@ impl HidHost {
             conn_handle: handle,
             transport: HidTransport::Classic { control, interrupt },
             boot, formats,
-            le_reports: HashMap::new(), le_boot_kind: None,
+            le_reports: HashMap::new(), le_boot_kind: None, le_led: None,
         });
         self.attach_channel(device, control, true)?;
         self.attach_channel(device, interrupt, false)?;
@@ -354,13 +365,20 @@ impl HidHost {
 
     fn on_inbound_channel(self: &Arc<Self>, handle: u16, cid: u16, is_control: bool) {
         let Some(device) = self.l2.device(handle) else { return; };
+        // Only paired devices may feed input: an unpaired one could otherwise inject keystrokes.
+        let paired = self.devices.lock().unwrap().get(&device).is_some_and(|d| d.paired);
+        if !paired {
+            eprintln!("[hid] refusing HID channel from unpaired device {device}");
+            let _ = self.l2.disconnect(cid);
+            return;
+        }
         {
             let mut st = self.st.lock().unwrap();
             let s = st.entry(device).or_insert_with(|| HidSession {
                 conn_handle: handle,
                 transport: HidTransport::Classic { control: 0, interrupt: 0 },
                 boot: true, formats: Vec::new(),
-                le_reports: HashMap::new(), le_boot_kind: None,
+                le_reports: HashMap::new(), le_boot_kind: None, le_led: None,
             });
             if let HidTransport::Classic { control, interrupt } = &mut s.transport {
                 if is_control { *control = cid; } else { *interrupt = cid; }
@@ -417,6 +435,7 @@ impl HidHost {
         let boot = formats.is_empty();
         let mut le_reports: HashMap<u16, u8> = HashMap::new();
         let mut le_boot_kind = None;
+        let mut le_led: Option<(u16, u8)> = None;
         let mut have_any = !formats.is_empty();
         for c in &chars {
             match c.uuid.as16() {
@@ -431,6 +450,8 @@ impl HidHost {
                         let _ = self.gatt.subscribe(handle, c.value_handle, 1);
                         le_reports.insert(c.value_handle, rid);
                         have_any = true;
+                    } else if rtype == 2 && le_led.is_none() {
+                        le_led = Some((c.value_handle, c.properties)); // output report: keyboard LEDs
                     }
                 }
                 Some(UUID_BOOT_KBD_IN) => {
@@ -448,6 +469,11 @@ impl HidHost {
                 Some(UUID_PROTOCOL_MODE) if !boot => {
                     let _ = self.write_char(handle, c, &[0x01]); // report mode
                 }
+                Some(UUID_BOOT_KBD_OUT) => {
+                    if le_led.is_none() {
+                        le_led = Some((c.value_handle, c.properties));
+                    }
+                }
                 Some(UUID_CONTROL_POINT) => {
                     let _ = self.write_char(handle, c, &[0x00]); // exit suspend
                 }
@@ -459,14 +485,19 @@ impl HidHost {
         }
         self.st.lock().unwrap().insert(*device, HidSession {
             conn_handle: handle, transport: HidTransport::Le,
-            boot, formats, le_reports, le_boot_kind,
+            boot, formats, le_reports, le_boot_kind, le_led,
         });
         Ok(())
     }
 
     fn write_char(&self, handle: u16, c: &GattCharacteristic, data: &[u8]) -> Result<()> {
-        if c.properties & 0x04 != 0 { self.gatt.write(handle, c.value_handle, data, false) }
-        else if c.properties & 0x08 != 0 { self.gatt.write(handle, c.value_handle, data, true) }
+        self.write_value(handle, c.value_handle, c.properties, data)
+    }
+
+    /// Write a characteristic value the way its properties allow (write-without-response preferred).
+    fn write_value(&self, conn: u16, value_handle: u16, properties: u8, data: &[u8]) -> Result<()> {
+        if properties & 0x04 != 0 { self.gatt.write(conn, value_handle, data, false) }
+        else if properties & 0x08 != 0 { self.gatt.write(conn, value_handle, data, true) }
         else { Err(Error::NotSupported("characteristic not writable".into())) }
     }
 
@@ -489,16 +520,22 @@ impl HidHost {
     pub fn set_keyboard_leds(&self, device: &DeviceId, leds: u8) -> Result<()> {
         let s = self.st.lock().unwrap().get(device).cloned()
             .ok_or_else(|| Error::NotFound("hid session".into()))?;
-        let HidTransport::Classic { control, .. } = s.transport else {
-            // LE: write the (boot) output report characteristic — wired when gatt write API is used by GUI
-            return Err(Error::NotSupported("LED control over GATT not wired yet".into()));
-        };
-        let mut pkt = vec![HIDP_SET_REPORT_OUT];
-        if !s.boot {
-            if let Some(id) = s.formats.iter().find(|f| f.kind == 1).and_then(|f| f.report_id) { pkt.push(id); }
+        match s.transport {
+            HidTransport::Le => {
+                // HOGP: the LED bitmask is the value of the (boot) keyboard output report characteristic
+                let (value_handle, props) = s.le_led
+                    .ok_or_else(|| Error::NotSupported("this keyboard has no LED output report".into()))?;
+                self.write_value(s.conn_handle, value_handle, props, &[leds])
+            }
+            HidTransport::Classic { control, .. } => {
+                let mut pkt = vec![HIDP_SET_REPORT_OUT];
+                if !s.boot {
+                    if let Some(id) = s.formats.iter().find(|f| f.kind == 1).and_then(|f| f.report_id) { pkt.push(id); }
+                }
+                pkt.push(leds);
+                self.l2.send(control, &pkt)
+            }
         }
-        pkt.push(leds);
-        self.l2.send(control, &pkt)
     }
 
     // ---- forwarding to mitos-input ----

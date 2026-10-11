@@ -17,9 +17,22 @@ fn main() {
             "--socket" if i + 1 < args.len() => { socket = args[i + 1].clone(); i += 1; }
             "--data" if i + 1 < args.len() => { data_dir = args[i + 1].clone(); i += 1; }
             "--serial" if i + 1 < args.len() => { serial = Some(args[i + 1].clone()); i += 1; }
-            _ => {}
+            "--help" | "-h" => {
+                println!("mitos-bluetooth [--socket PATH] [--data DIR] [--serial TTY]");
+                println!("  --socket  IPC socket (default /tmp/mitos-bluetooth.sock)");
+                println!("  --data    state directory for bonds and configuration (default /var/lib/mitos-bluetooth)");
+                println!("  --serial  drive an H4 UART controller instead of the kernel's HCI adapters (baud: MITOS_BT_BAUD)");
+                return;
+            }
+            other => eprintln!("[bluetooth] ignoring unknown argument: {other}"),
         }
         i += 1;
+    }
+    // Installed before the (slow) controller bring-up so a stop request is honoured as soon as it arrives.
+    // SAFETY: `on_signal` only performs an atomic store, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     let mgr = match BluetoothManager::new(&data_dir) {
         Ok(m) => m,
@@ -36,10 +49,6 @@ fn main() {
     for a in mgr.adapters() { println!("[bluetooth] adapter hci{} ready: {} ({})", a.index, a.address, a.name); }
     println!("[bluetooth] state: {:?}", mgr.state());
 
-    unsafe {
-    libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
-    libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-     }
     let ipc = IpcServer::new(socket, mgr.clone());
     if let Err(e) = ipc.run(&RUNNING) { eprintln!("[ipc] {e}"); }
 

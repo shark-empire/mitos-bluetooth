@@ -25,6 +25,11 @@ mod att {
     pub const ERR_ATTR_NOT_FOUND: u8 = 0x0a;
 }
 
+/// Requests are the even ATT opcodes below 0x21, except the confirmation (0x1e).
+fn is_peer_request(op: u8) -> bool {
+    op & 1 == 0 && (0x02..=0x20).contains(&op) && op != att::CONFIRM
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GattUuid(pub u128);
 
@@ -104,15 +109,9 @@ impl GattManager {
                 mgr.on_att(p.handle, &p.data);
             }
         }).ok();
-        // negotiate a larger MTU (best-effort; default stays 23 if it fails)
-        if let Ok(d) = self.request(handle, att::MTU_REQ, &247u16.to_le_bytes()) {
-            if let Some(m) = d.first().and_then(|_| d.get(1)) {
-                let server = u16::from_le_bytes([d[0], d[1]]);
-                let mut st = self.st.lock().unwrap();
-                if let Some(c) = st.get_mut(&handle) { c.mtu = 247u16.min(server).max(23); }
-                let _ = m;
-            }
-        }
+        // negotiate a larger MTU (best-effort: the default stays 23 if the peer does not answer);
+        // on_att() records the agreed value when the response arrives
+        let _ = self.request(handle, att::MTU_REQ, &247u16.to_le_bytes());
         Ok(())
     }
 
@@ -149,6 +148,19 @@ impl GattManager {
 
     fn on_att(&self, conn: u16, data: &[u8]) {
         let Some(&op) = data.first() else { return };
+        if is_peer_request(op) {
+            // We are a pure GATT client with an empty attribute database. Answer anyway: a request left
+            // unanswered makes the peer's 30 s transaction timer expire, which kills the ATT bearer.
+            let at = |i: usize| u16::from_le_bytes([data.get(i).copied().unwrap_or(0), data.get(i + 1).copied().unwrap_or(0)]);
+            let (handle, code) = match op {
+                0x04 | 0x06 | 0x08 | 0x10 => (at(1), 0x0a), // find info / find by type / read by type / read by group: attribute not found
+                0x0a | 0x0c | 0x12 | 0x16 => (at(1), 0x01), // read / read blob / write / prepare write: invalid handle
+                _ => (0, 0x06),                              // request not supported
+            };
+            let h = handle.to_le_bytes();
+            let _ = self.l2.send_fixed(conn, CID_ATT, &[att::ERROR, op, h[0], h[1], code]);
+            return;
+        }
         let mut notify: Option<(DeviceId, u16, Vec<u8>)> = None;
         let mut confirm = false;
         {
@@ -255,11 +267,11 @@ if start == 0 { break; }
             }
         }
         for i in 0..chars.len() {
-            chars[i].end_handle = if i + 1 < chars.len() { chars[i + 1].start_handle - 1 } else { service.end };
+            chars[i].end_handle = if i + 1 < chars.len() { chars[i + 1].start_handle.saturating_sub(1) } else { service.end };
         }
         for ch in chars.iter_mut() {
             if ch.end_handle > ch.value_handle {
-                ch.descriptors = self.find_descriptors(conn, ch.value_handle + 1, ch.end_handle).unwrap_or_default();
+                ch.descriptors = self.find_descriptors(conn, ch.value_handle.saturating_add(1), ch.end_handle).unwrap_or_default();
             }
         }
         let mut st = self.st.lock().unwrap();
@@ -344,7 +356,7 @@ if start == 0 { break; }
                     }
                 }
             }
-            found.unwrap_or(value_handle + 1)
+            found.unwrap_or(value_handle.saturating_add(1))
         };
         self.write(conn, cccd, &cccd_value.to_le_bytes(), true)
     }

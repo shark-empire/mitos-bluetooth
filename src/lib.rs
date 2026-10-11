@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 pub mod error;
 pub mod device;
 pub mod events;
