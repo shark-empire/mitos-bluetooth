@@ -19,3 +19,6 @@ libc = "0.2"
 
 [profile.release]
 lto = true
+opt-level = "s"      # smaller binary and working set; this daemon is I/O bound, not CPU bound
+codegen-units = 1
+strip = true
