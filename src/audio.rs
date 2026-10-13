@@ -380,10 +380,12 @@ impl AudioManager {
         let st = self.st.lock().unwrap();
         let a = st.get(device)?.a2dp.as_ref()?;
         let mtu = self.l2.remote_mtu(a.media_cid);
+        // Read the delay into a local first: a guard temporary in the tail expression would outlive `st` (E0597).
+        let delay_ms = *a.delay_ms.lock().unwrap();
         Some(A2dpInfo {
             started: a.started, config: a.cfg, mtu,
             max_packet_payload: mtu.saturating_sub(RTP_OVERHEAD),
-            delay_ms: *a.delay_ms.lock().unwrap(),
+            delay_ms,
             socket_path: a.socket_path.clone(),
         })
     }
