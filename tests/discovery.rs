@@ -14,12 +14,13 @@ fn temp_mgr(tag: &str) -> (Arc<BluetoothManager>, Arc<std::sync::Mutex<mitos_blu
     (mgr, shared)
 }
 
-
 fn wait_event<T>(rx: &std::sync::mpsc::Receiver<Event>, secs: u64, mut f: impl FnMut(Event) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
         if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100)) {
-            if let Some(v) = f(ev) { return Some(v); }
+            if let Some(v) = f(ev) {
+                return Some(v);
+            }
         }
     }
     None
@@ -33,7 +34,8 @@ fn inquiry_produces_device_found() {
     let d = wait_event(&rx, 5, |ev| match ev {
         Event::DeviceFound { device } => Some(device),
         _ => None,
-    }).expect("no DeviceFound event");
+    })
+    .expect("no DeviceFound event");
     assert_eq!(d.properties.name.as_deref(), Some("Mock Keyboard"));
     assert!(d.properties.class.is_keyboard());
     assert_eq!(d.properties.rssi, Some(-60));
@@ -42,7 +44,7 @@ fn inquiry_produces_device_found() {
     assert!(mgr.devices(0).unwrap().iter().any(|d| d.id == id));
     // inquiry completes -> DiscoveryStopped
     assert!(wait_event(&rx, 5, |ev| matches!(ev, Event::DiscoveryStopped { .. }).then_some(())).is_some());
-    }
+}
 
 #[test]
 fn inquiry_result_without_eir_resolves_name_in_background() {
@@ -52,7 +54,8 @@ fn inquiry_result_without_eir_resolves_name_in_background() {
     // Inquiry Result with RSSI (no EIR => no name)
     let mut p = vec![0x01];
     p.extend_from_slice(&addr);
-    p.push(0x02); p.push(0x00);
+    p.push(0x02);
+    p.push(0x00);
     p.extend_from_slice(&[0x40, 0x05, 0x00]);
     p.extend_from_slice(&0u16.to_le_bytes());
     p.push(0xC8);
@@ -60,8 +63,11 @@ fn inquiry_result_without_eir_resolves_name_in_background() {
     ev.extend_from_slice(&p);
     shared.lock().unwrap().inject_event(ev);
     let got = wait_event(&rx, 5, |ev| match ev {
-        Event::DeviceUpdated { device } if device.id.address.0 == addr && device.properties.name.is_some() => Some(device),
+        Event::DeviceUpdated { device } if device.id.address.0 == addr && device.properties.name.is_some() => {
+            Some(device)
+        }
         _ => None,
-    }).expect("name never resolved");
+    })
+    .expect("name never resolved");
     assert_eq!(got.properties.name.as_deref(), Some("Mock Keyboard"));
 }

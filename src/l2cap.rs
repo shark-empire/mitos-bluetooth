@@ -257,13 +257,7 @@ impl L2cap {
     }
 
     pub fn send_fixed(&self, handle: u16, cid: u16, data: &[u8]) -> Result<()> {
-        let le = self
-            .st
-            .lock()
-            .unwrap()
-            .devices
-            .get(&handle)
-            .is_some_and(|d| d.address_type != AddressType::Bredr);
+        let le = self.st.lock().unwrap().devices.get(&handle).is_some_and(|d| d.address_type != AddressType::Bredr);
         let mut pdu = Vec::with_capacity(4 + data.len());
         pdu.extend_from_slice(&(data.len() as u16).to_le_bytes());
         pdu.extend_from_slice(&cid.to_le_bytes());
@@ -332,7 +326,13 @@ impl L2cap {
             if let Some(ch) = st.channels.get(&sdu.cid) {
                 if ch.handle == sdu.handle {
                     if let Some(tx) = st.handlers.get(&sdu.cid) {
-                        let _ = tx.send(L2Packet { handle: sdu.handle, cid: sdu.cid, psm: ch.psm, data: sdu.data, closed: false });
+                        let _ = tx.send(L2Packet {
+                            handle: sdu.handle,
+                            cid: sdu.cid,
+                            psm: ch.psm,
+                            data: sdu.data,
+                            closed: false,
+                        });
                     }
                 }
             }
@@ -349,7 +349,8 @@ impl L2cap {
             if code == 0x12 {
                 // Connection Parameter Update Request: [min][max][latency][timeout]
                 let valid = payload.len() >= 8 && {
-                    let (imin, imax, lat, to) = (le16(payload, 0), le16(payload, 2), le16(payload, 4), le16(payload, 6));
+                    let (imin, imax, lat, to) =
+                        (le16(payload, 0), le16(payload, 2), le16(payload, 4), le16(payload, 6));
                     (6..=3200).contains(&imin)
                         && (6..=3200).contains(&imax)
                         && imin <= imax

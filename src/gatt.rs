@@ -34,9 +34,19 @@ fn is_peer_request(op: u8) -> bool {
 pub struct GattUuid(pub u128);
 
 impl GattUuid {
-    pub fn from_le16(b: &[u8]) -> Self { GattUuid(u16::from_le_bytes([b[0], b[1]]) as u128) }
-    pub fn from_le128(b: &[u8]) -> Self { GattUuid(u128::from_le_bytes(b[..16].try_into().unwrap())) }
-    pub fn as16(&self) -> Option<u16> { if self.0 <= 0xffff { Some(self.0 as u16) } else { None } }
+    pub fn from_le16(b: &[u8]) -> Self {
+        GattUuid(u16::from_le_bytes([b[0], b[1]]) as u128)
+    }
+    pub fn from_le128(b: &[u8]) -> Self {
+        GattUuid(u128::from_le_bytes(b[..16].try_into().unwrap()))
+    }
+    pub fn as16(&self) -> Option<u16> {
+        if self.0 <= 0xffff {
+            Some(self.0 as u16)
+        } else {
+            None
+        }
+    }
 }
 impl fmt::Display for GattUuid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -56,7 +66,11 @@ impl Serialize for GattUuid {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct GattService { pub start: u16, pub end: u16, pub uuid: GattUuid }
+pub struct GattService {
+    pub start: u16,
+    pub end: u16,
+    pub uuid: GattUuid,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +85,10 @@ pub struct GattCharacteristic {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GattDescriptor { pub handle: u16, pub uuid: GattUuid }
+pub struct GattDescriptor {
+    pub handle: u16,
+    pub uuid: GattUuid,
+}
 
 struct GattConn {
     device: DeviceId,
@@ -98,17 +115,25 @@ impl GattManager {
         let (tx, rx) = channel();
         {
             let mut st = self.st.lock().unwrap();
-            if st.contains_key(&handle) { return Ok(()); }
+            if st.contains_key(&handle) {
+                return Ok(());
+            }
             self.l2.register_fixed(handle, CID_ATT, tx);
             st.insert(handle, GattConn { device, mtu: 23, pending: None, services: None, chars: HashMap::new() });
         }
         let mgr = self.clone();
-        std::thread::Builder::new().name("att".into()).spawn(move || {
-            while let Ok(p) = rx.recv() {
-                if p.closed { mgr.st.lock().unwrap().remove(&p.handle); break; }
-                mgr.on_att(p.handle, &p.data);
-            }
-        }).ok();
+        std::thread::Builder::new()
+            .name("att".into())
+            .spawn(move || {
+                while let Ok(p) = rx.recv() {
+                    if p.closed {
+                        mgr.st.lock().unwrap().remove(&p.handle);
+                        break;
+                    }
+                    mgr.on_att(p.handle, &p.data);
+                }
+            })
+            .ok();
         // negotiate a larger MTU (best-effort: the default stays 23 if the peer does not answer);
         // on_att() records the agreed value when the response arrives
         let _ = self.request(handle, att::MTU_REQ, &247u16.to_le_bytes());
@@ -118,7 +143,9 @@ impl GattManager {
     pub fn detach(&self, handle: u16) {
         self.l2.unregister_fixed(handle, CID_ATT);
         if let Some(c) = self.st.lock().unwrap().remove(&handle) {
-            if let Some((_, tx)) = c.pending { let _ = tx.send(Err(Error::InvalidState("gatt detached".into()))); }
+            if let Some((_, tx)) = c.pending {
+                let _ = tx.send(Err(Error::InvalidState("gatt detached".into())));
+            }
         }
     }
 
@@ -128,19 +155,25 @@ impl GattManager {
         {
             let mut st = self.st.lock().unwrap();
             let c = st.get_mut(&conn).ok_or_else(|| Error::InvalidState("gatt not attached".into()))?;
-            if c.pending.is_some() { return Err(Error::InvalidState("gatt request already in flight".into())); }
+            if c.pending.is_some() {
+                return Err(Error::InvalidState("gatt request already in flight".into()));
+            }
             c.pending = Some((opcode, tx));
         }
         let mut pkt = vec![opcode];
         pkt.extend_from_slice(params);
         if let Err(e) = self.l2.send_fixed(conn, CID_ATT, &pkt) {
-            if let Some(c) = self.st.lock().unwrap().get_mut(&conn) { c.pending = None; }
+            if let Some(c) = self.st.lock().unwrap().get_mut(&conn) {
+                c.pending = None;
+            }
             return Err(e);
         }
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(r) => r,
             Err(_) => {
-                if let Some(c) = self.st.lock().unwrap().get_mut(&conn) { c.pending = None; }
+                if let Some(c) = self.st.lock().unwrap().get_mut(&conn) {
+                    c.pending = None;
+                }
                 Err(Error::Timeout("att response"))
             }
         }
@@ -151,11 +184,13 @@ impl GattManager {
         if is_peer_request(op) {
             // We are a pure GATT client with an empty attribute database. Answer anyway: a request left
             // unanswered makes the peer's 30 s transaction timer expire, which kills the ATT bearer.
-            let at = |i: usize| u16::from_le_bytes([data.get(i).copied().unwrap_or(0), data.get(i + 1).copied().unwrap_or(0)]);
+            let at = |i: usize| {
+                u16::from_le_bytes([data.get(i).copied().unwrap_or(0), data.get(i + 1).copied().unwrap_or(0)])
+            };
             let (handle, code) = match op {
                 0x04 | 0x06 | 0x08 | 0x10 => (at(1), 0x0a), // find info / find by type / read by type / read by group: attribute not found
                 0x0a | 0x0c | 0x12 | 0x16 => (at(1), 0x01), // read / read blob / write / prepare write: invalid handle
-                _ => (0, 0x06),                              // request not supported
+                _ => (0, 0x06),                             // request not supported
             };
             let h = handle.to_le_bytes();
             let _ = self.l2.send_fixed(conn, CID_ATT, &[att::ERROR, op, h[0], h[1], code]);
@@ -189,7 +224,9 @@ impl GattManager {
                 confirm = op == att::INDICATE;
             }
         }
-        if confirm { let _ = self.l2.send_fixed(conn, CID_ATT, &[att::CONFIRM]); }
+        if confirm {
+            let _ = self.l2.send_fixed(conn, CID_ATT, &[att::CONFIRM]);
+        }
         if let Some((device, attribute, value)) = notify {
             self.bus.publish(Event::GattNotification { id: device, attribute, value });
         }
@@ -200,7 +237,11 @@ impl GattManager {
     pub fn discover_services(&self, conn: u16) -> Result<Vec<GattService>> {
         {
             let st = self.st.lock().unwrap();
-            if let Some(c) = st.get(&conn) { if let Some(s) = &c.services { return Ok(s.clone()); } }
+            if let Some(c) = st.get(&conn) {
+                if let Some(s) = &c.services {
+                    return Ok(s.clone());
+                }
+            }
         }
         let mut services = Vec::new();
         let mut start: u16 = 0x0001;
@@ -214,22 +255,30 @@ impl GattManager {
                     while item_len >= 6 && off + item_len <= data.len() {
                         let sh = u16::from_le_bytes([data[off], data[off + 1]]);
                         let eh = u16::from_le_bytes([data[off + 2], data[off + 3]]);
-                        let uuid = if item_len == 6 { GattUuid::from_le16(&data[off + 4..]) }
-                                   else { GattUuid::from_le128(&data[off + 4..]) };
+                        let uuid = if item_len == 6 {
+                            GattUuid::from_le16(&data[off + 4..])
+                        } else {
+                            GattUuid::from_le128(&data[off + 4..])
+                        };
                         services.push(GattService { start: sh, end: eh, uuid });
                         off += item_len;
                     }
-if services.len() == before { break; }
-start = services.last().unwrap().end.wrapping_add(1);
-if start == 0 { break; }
-
+                    if services.len() == before {
+                        break;
+                    }
+                    start = services.last().unwrap().end.wrapping_add(1);
+                    if start == 0 {
+                        break;
+                    }
                 }
                 Err(Error::Att { code: att::ERR_ATTR_NOT_FOUND, .. }) => break, // normal terminator
                 Err(e) => return Err(e),
             }
         }
         let mut st = self.st.lock().unwrap();
-        if let Some(c) = st.get_mut(&conn) { c.services = Some(services.clone()); }
+        if let Some(c) = st.get_mut(&conn) {
+            c.services = Some(services.clone());
+        }
         Ok(services)
     }
 
@@ -237,7 +286,9 @@ if start == 0 { break; }
         {
             let st = self.st.lock().unwrap();
             if let Some(c) = st.get(&conn) {
-                if let Some(v) = c.chars.get(&service.start) { return Ok(v.clone()); }
+                if let Some(v) = c.chars.get(&service.start) {
+                    return Ok(v.clone());
+                }
             }
         }
         let mut chars: Vec<GattCharacteristic> = Vec::new();
@@ -253,54 +304,87 @@ if start == 0 { break; }
                         let decl = u16::from_le_bytes([data[off], data[off + 1]]);
                         let props = data[off + 2];
                         let vh = u16::from_le_bytes([data[off + 3], data[off + 4]]);
-                        let uuid = if item_len == 7 { GattUuid::from_le16(&data[off + 5..]) }
-                                   else { GattUuid::from_le128(&data[off + 5..]) };
-                        chars.push(GattCharacteristic { start_handle: decl, value_handle: vh, end_handle: 0, uuid, properties: props, descriptors: Vec::new() });
+                        let uuid = if item_len == 7 {
+                            GattUuid::from_le16(&data[off + 5..])
+                        } else {
+                            GattUuid::from_le128(&data[off + 5..])
+                        };
+                        chars.push(GattCharacteristic {
+                            start_handle: decl,
+                            value_handle: vh,
+                            end_handle: 0,
+                            uuid,
+                            properties: props,
+                            descriptors: Vec::new(),
+                        });
                         off += item_len;
                     }
-                    if chars.len() == before { break; }
+                    if chars.len() == before {
+                        break;
+                    }
                     start = chars.last().unwrap().start_handle.wrapping_add(1);
-                    if start == 0 || start > service.end { break; }
+                    if start == 0 || start > service.end {
+                        break;
+                    }
                 }
                 Err(Error::Att { code: att::ERR_ATTR_NOT_FOUND, .. }) => break,
                 Err(e) => return Err(e),
             }
         }
         for i in 0..chars.len() {
-            chars[i].end_handle = if i + 1 < chars.len() { chars[i + 1].start_handle.saturating_sub(1) } else { service.end };
+            chars[i].end_handle =
+                if i + 1 < chars.len() { chars[i + 1].start_handle.saturating_sub(1) } else { service.end };
         }
         for ch in chars.iter_mut() {
             if ch.end_handle > ch.value_handle {
-                ch.descriptors = self.find_descriptors(conn, ch.value_handle.saturating_add(1), ch.end_handle).unwrap_or_default();
+                ch.descriptors =
+                    self.find_descriptors(conn, ch.value_handle.saturating_add(1), ch.end_handle).unwrap_or_default();
             }
         }
         let mut st = self.st.lock().unwrap();
-        if let Some(c) = st.get_mut(&conn) { c.chars.insert(service.start, chars.clone()); }
+        if let Some(c) = st.get_mut(&conn) {
+            c.chars.insert(service.start, chars.clone());
+        }
         Ok(chars)
     }
 
     fn find_descriptors(&self, conn: u16, mut start: u16, end: u16) -> Result<Vec<GattDescriptor>> {
         let mut out = Vec::new();
-        if start > end { return Ok(out); }
+        if start > end {
+            return Ok(out);
+        }
         loop {
             let params = [start.to_le_bytes(), end.to_le_bytes()].concat();
             match self.request(conn, att::FIND_INFO_REQ, &params) {
                 Ok(data) => {
-                    if data.len() < 3 { break; }
+                    if data.len() < 3 {
+                        break;
+                    }
                     let fmt = data[0];
-                    let pair = if fmt == 1 { 4usize } else if fmt == 2 { 18 } else { break };
+                    let pair = if fmt == 1 {
+                        4usize
+                    } else if fmt == 2 {
+                        18
+                    } else {
+                        break;
+                    };
                     let mut off = 1;
                     let mut added = 0;
                     while off + pair <= data.len() {
                         let h = u16::from_le_bytes([data[off], data[off + 1]]);
-                        let uuid = if fmt == 1 { GattUuid::from_le16(&data[off + 2..]) }
-                                   else { GattUuid::from_le128(&data[off + 2..]) };
+                        let uuid = if fmt == 1 {
+                            GattUuid::from_le16(&data[off + 2..])
+                        } else {
+                            GattUuid::from_le128(&data[off + 2..])
+                        };
                         out.push(GattDescriptor { handle: h, uuid });
                         start = h.wrapping_add(1);
                         added += 1;
                         off += pair;
                     }
-                    if added == 0 || start == 0 || start > end { break; }
+                    if added == 0 || start == 0 || start > end {
+                        break;
+                    }
                 }
                 Err(_) => break,
             }
@@ -319,7 +403,9 @@ if start == 0 { break; }
                 Ok(d) if !d.is_empty() => {
                     let n = d.len();
                     out.extend_from_slice(&d);
-                    if n < mtu.saturating_sub(1) { break; }
+                    if n < mtu.saturating_sub(1) {
+                        break;
+                    }
                 }
                 _ => break,
             }
@@ -350,7 +436,10 @@ if start == 0 { break; }
                     for ch in list {
                         if (ch.start_handle..=ch.end_handle).contains(&value_handle) {
                             for d in &ch.descriptors {
-                                if d.uuid.as16() == Some(0x2902) { found = Some(d.handle); break 'outer; }
+                                if d.uuid.as16() == Some(0x2902) {
+                                    found = Some(d.handle);
+                                    break 'outer;
+                                }
                             }
                         }
                     }

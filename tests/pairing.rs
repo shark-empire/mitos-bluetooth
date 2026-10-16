@@ -5,7 +5,6 @@ use mitos_bluetooth::hci::{op, MockState, MockTransport};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-
 type Shared = Arc<Mutex<MockState>>;
 
 fn temp_mgr(tag: &str) -> (Arc<BluetoothManager>, Shared) {
@@ -14,9 +13,9 @@ fn temp_mgr(tag: &str) -> (Arc<BluetoothManager>, Shared) {
     let dir = std::env::temp_dir().join(format!("mitos-bt-pair-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut mgr = BluetoothManager::new(&dir.to_string_lossy()).unwrap();
-      if let Some(mgr_ref) = Arc::get_mut(&mut mgr) {
-    mgr_ref.pair_timeout = Duration::from_secs(10);
-       }
+    if let Some(mgr_ref) = Arc::get_mut(&mut mgr) {
+        mgr_ref.pair_timeout = Duration::from_secs(10);
+    }
 
     mgr.power_on_with(0, Box::new(mock)).unwrap();
     (mgr, shared)
@@ -37,7 +36,10 @@ fn pair_via_ssp_just_works_and_bonds() {
     assert!(sent.iter().any(|c| c[1..3] == op::LINK_KEY_REQUEST_NEG_REPLY.to_le_bytes()));
     // IO capability reply: DisplayYesNo (0x01 - HCI only knows 0..=3), no OOB data, general bonding
     assert!(sent.iter().any(|c| c[1..3] == op::IO_CAPABILITY_REQUEST_REPLY.to_le_bytes()
-        && c.len() == 13 && c[10] == 0x01 && c[11] == 0x00 && c[12] == 0x04));
+        && c.len() == 13
+        && c[10] == 0x01
+        && c[11] == 0x00
+        && c[12] == 0x04));
     assert!(sent.iter().any(|c| c[1..3] == op::USER_CONFIRMATION_REQUEST_REPLY.to_le_bytes()));
     // pairing again uses the stored key: Link Key Request Reply, no re-pair
     mgr.pair(0, &id).unwrap();
@@ -57,11 +59,16 @@ fn legacy_pin_request_is_auto_answered() {
         let hit = {
             let st = shared.lock().unwrap();
             st.sent_commands().iter().any(|c| {
-                c.len() >= 27 && c[1..3] == op::PIN_CODE_REQUEST_REPLY.to_le_bytes()
-                    && c[4..10] == addr && c[10] == 4 && c[11..15] == *b"0000"
+                c.len() >= 27
+                    && c[1..3] == op::PIN_CODE_REQUEST_REPLY.to_le_bytes()
+                    && c[4..10] == addr
+                    && c[10] == 4
+                    && c[11..15] == *b"0000"
             })
         };
-        if hit { return; }
+        if hit {
+            return;
+        }
         assert!(Instant::now() < deadline, "PIN reply never sent");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -117,7 +124,12 @@ fn peer_demanding_mitm_gets_a_numeric_comparison_prompt() {
     assert!(matches!(request.method, PairingMethod::NumericComparison));
     assert_eq!(request.passkey, Some(123_456));
     // nothing may be confirmed on the user's behalf
-    assert!(shared.lock().unwrap().sent_commands().iter().all(|c| c[1..3] != op::USER_CONFIRMATION_REQUEST_REPLY.to_le_bytes()));
+    assert!(shared
+        .lock()
+        .unwrap()
+        .sent_commands()
+        .iter()
+        .all(|c| c[1..3] != op::USER_CONFIRMATION_REQUEST_REPLY.to_le_bytes()));
     // the user says the numbers match
     mgr.pairing_confirm(0, &id, true).unwrap();
     let reply = wait_command(&shared, op::USER_CONFIRMATION_REQUEST_REPLY).expect("confirmation was not sent");

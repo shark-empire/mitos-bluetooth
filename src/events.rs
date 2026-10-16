@@ -7,7 +7,13 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum PairingMethod { PinCode, PasskeyEntry, NumericComparison, JustWorks, Authorization }
+pub enum PairingMethod {
+    PinCode,
+    PasskeyEntry,
+    NumericComparison,
+    JustWorks,
+    Authorization,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

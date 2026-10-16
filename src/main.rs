@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-extern "C" fn on_signal(_sig: i32) { RUNNING.store(false, Ordering::Relaxed); }
+extern "C" fn on_signal(_sig: i32) {
+    RUNNING.store(false, Ordering::Relaxed);
+}
 
 fn main() {
     let mut socket = "/tmp/mitos-bluetooth.sock".to_string();
@@ -14,9 +16,18 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--socket" if i + 1 < args.len() => { socket = args[i + 1].clone(); i += 1; }
-            "--data" if i + 1 < args.len() => { data_dir = args[i + 1].clone(); i += 1; }
-            "--serial" if i + 1 < args.len() => { serial = Some(args[i + 1].clone()); i += 1; }
+            "--socket" if i + 1 < args.len() => {
+                socket = args[i + 1].clone();
+                i += 1;
+            }
+            "--data" if i + 1 < args.len() => {
+                data_dir = args[i + 1].clone();
+                i += 1;
+            }
+            "--serial" if i + 1 < args.len() => {
+                serial = Some(args[i + 1].clone());
+                i += 1;
+            }
             "--help" | "-h" => {
                 println!("mitos-bluetooth [--socket PATH] [--data DIR] [--serial TTY]");
                 println!("  --socket  IPC socket (default /tmp/mitos-bluetooth.sock)");
@@ -36,7 +47,10 @@ fn main() {
     }
     let mgr = match BluetoothManager::new(&data_dir) {
         Ok(m) => m,
-        Err(e) => { eprintln!("[bluetooth] storage init failed: {e} (try --data)"); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("[bluetooth] storage init failed: {e} (try --data)");
+            std::process::exit(1);
+        }
     };
     if let Some(path) = &serial {
         match mgr.power_on_serial(0, path) {
@@ -46,14 +60,20 @@ fn main() {
     } else if let Err(e) = mgr.init() {
         eprintln!("[bluetooth] init: {e}");
     }
-    for a in mgr.adapters() { println!("[bluetooth] adapter hci{} ready: {} ({})", a.index, a.address, a.name); }
+    for a in mgr.adapters() {
+        println!("[bluetooth] adapter hci{} ready: {} ({})", a.index, a.address, a.name);
+    }
     println!("[bluetooth] state: {:?}", mgr.state());
 
     let ipc = IpcServer::new(socket, mgr.clone());
-    if let Err(e) = ipc.run(&RUNNING) { eprintln!("[ipc] {e}"); }
+    if let Err(e) = ipc.run(&RUNNING) {
+        eprintln!("[ipc] {e}");
+    }
 
     // graceful shutdown: release the controllers
     let indexes: Vec<u32> = mgr.adapters().iter().map(|a| a.index).collect();
-    for idx in indexes { let _ = mgr.power_off(idx); }
+    for idx in indexes {
+        let _ = mgr.power_off(idx);
+    }
     println!("[bluetooth] stopped");
 }

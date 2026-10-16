@@ -6,7 +6,9 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-pub const fn opcode(ogf: u16, ocf: u16) -> u16 { ((ogf & 0x3f) << 10) | (ocf & 0x3ff) }
+pub const fn opcode(ogf: u16, ocf: u16) -> u16 {
+    ((ogf & 0x3f) << 10) | (ocf & 0x3ff)
+}
 
 pub mod op {
     use super::opcode;
@@ -131,7 +133,11 @@ impl HciEvent {
 }
 
 #[derive(Debug)]
-pub struct AclSdu { pub handle: u16, pub cid: u16, pub data: Vec<u8> }
+pub struct AclSdu {
+    pub handle: u16,
+    pub cid: u16,
+    pub data: Vec<u8>,
+}
 
 /// One H4-framed packet at a time (type byte included).
 pub trait HciTransport: Send {
@@ -146,7 +152,9 @@ pub trait HciTransport: Send {
 // ---------------- Linux: HCI user-channel socket (exclusive access, H4 framing) ----------------
 const HCIDEVDOWN: libc::c_ulong = 0x400448CA;
 
-pub struct LinuxHciSocket { fd: i32 }
+pub struct LinuxHciSocket {
+    fd: i32,
+}
 
 impl LinuxHciSocket {
     fn new(fd: i32) -> Self {
@@ -194,17 +202,25 @@ impl HciTransport for LinuxHciSocket {
                 _ => Error::Io(e),
             });
         }
-        if n == 0 { return Err(Error::TransportClosed); }
+        if n == 0 {
+            return Err(Error::TransportClosed);
+        }
         out.truncate(n as usize);
         Ok(n as usize)
     }
     fn try_clone(&self) -> Result<Box<dyn HciTransport>> {
         let fd = unsafe { libc::dup(self.fd) };
-        if fd < 0 { return Err(Error::Io(std::io::Error::last_os_error())); }
+        if fd < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
         Ok(Box::new(LinuxHciSocket::new(fd)))
     }
-    fn name(&self) -> String { format!("hci-user-fd-{}", self.fd) }
-    fn close(&mut self) { self.close_fd(); }
+    fn name(&self) -> String {
+        format!("hci-user-fd-{}", self.fd)
+    }
+    fn close(&mut self) {
+        self.close_fd();
+    }
 }
 
 const BTPROTO_HCI: libc::c_int = 1;
@@ -249,8 +265,13 @@ pub fn open_hci_user_channel(index: u32) -> Result<LinuxHciSocket> {
                 break;
             }
             let tv = libc::timeval { tv_sec: 0, tv_usec: 250_000 };
-            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, &tv as *const _ as *const libc::c_void,
-                             std::mem::size_of::<libc::timeval>() as libc::socklen_t);
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &tv as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            );
             return Ok(LinuxHciSocket::new(fd));
         }
     }
@@ -264,7 +285,9 @@ pub fn list_linux_adapters() -> Vec<(u32, String)> {
             let name = e.file_name().to_string_lossy().to_string();
             if let Some(idx) = name.strip_prefix("hci") {
                 if let Ok(i) = idx.parse::<u32>() {
-                    let addr = std::fs::read_to_string(e.path().join("address")).map(|s| s.trim().to_string()).unwrap_or_default();
+                    let addr = std::fs::read_to_string(e.path().join("address"))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
                     v.push((i, addr));
                 }
             }
@@ -312,7 +335,12 @@ fn configure_tty(f: &std::fs::File) -> Result<()> {
     }
     Ok(())
 }
-pub struct SerialH4 { port: Box<dyn std::io::Read + Send>, writer: Box<dyn std::io::Write + Send>, buf: Vec<u8>, label: String }
+pub struct SerialH4 {
+    port: Box<dyn std::io::Read + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+    buf: Vec<u8>,
+    label: String,
+}
 
 impl SerialH4 {
     pub fn open(path: &str) -> Result<Self> {
@@ -325,7 +353,9 @@ impl SerialH4 {
         while self.buf.len() < need {
             let mut tmp = [0u8; 256];
             let n = self.port.read(&mut tmp)?;
-            if n == 0 { return Err(Error::TransportClosed); }
+            if n == 0 {
+                return Err(Error::TransportClosed);
+            }
             self.buf.extend_from_slice(&tmp[..n]);
         }
         Ok(())
@@ -368,12 +398,14 @@ impl HciTransport for SerialH4 {
         }
     }
     fn try_clone(&self) -> Result<Box<dyn HciTransport>> {
-    // Re-open the same device: the reader thread owns one fd, the writer another.
-    let f = std::fs::OpenOptions::new().read(true).write(true).open(&self.label)?;
-    let w = f.try_clone()?;
-    Ok(Box::new(SerialH4 { port: Box::new(f), writer: Box::new(w), buf: Vec::new(), label: self.label.clone() }))
-      }
-    fn name(&self) -> String { self.label.clone() }
+        // Re-open the same device: the reader thread owns one fd, the writer another.
+        let f = std::fs::OpenOptions::new().read(true).write(true).open(&self.label)?;
+        let w = f.try_clone()?;
+        Ok(Box::new(SerialH4 { port: Box::new(f), writer: Box::new(w), buf: Vec::new(), label: self.label.clone() }))
+    }
+    fn name(&self) -> String {
+        self.label.clone()
+    }
 }
 
 // ---------------- HciClient ----------------
@@ -468,7 +500,14 @@ impl HciClient {
                 acl_rx: HashMap::new(),
             }),
             cmd_lock: Mutex::new(()),
-            credits: Mutex::new(Credits { mtu: 27, le_mtu: 0, total: 8, available: 8, set: false, in_flight: HashMap::new() }),
+            credits: Mutex::new(Credits {
+                mtu: 27,
+                le_mtu: 0,
+                total: 8,
+                available: 8,
+                set: false,
+                in_flight: HashMap::new(),
+            }),
             credits_cv: Condvar::new(),
             handler: Mutex::new(None),
             acl_tx: Mutex::new(None),
@@ -1045,7 +1084,8 @@ fn mock_on_command(st: &mut MockState, opcode: u16, params: &[u8]) {
             if let Some(addr) = addr_param {
                 let handle = st.handles.iter().find(|(_, a)| **a == addr).map(|(h, _)| *h);
                 if let Some(h) = handle {
-                    st.outbox.push_back((t(20), mock_ev(ev::AUTHENTICATION_COMPLETE, &[0x00, h as u8, (h >> 8) as u8])));
+                    st.outbox
+                        .push_back((t(20), mock_ev(ev::AUTHENTICATION_COMPLETE, &[0x00, h as u8, (h >> 8) as u8])));
                 }
             }
         }

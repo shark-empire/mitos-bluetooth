@@ -330,7 +330,13 @@ pub struct Smp {
 }
 
 impl Smp {
-    pub fn new(l2: Arc<L2cap>, hci: Arc<HciClient>, bus: Arc<EventBus>, bonds: Arc<BondStore>, own: Address) -> Arc<Self> {
+    pub fn new(
+        l2: Arc<L2cap>,
+        hci: Arc<HciClient>,
+        bus: Arc<EventBus>,
+        bonds: Arc<BondStore>,
+        own: Address,
+    ) -> Arc<Self> {
         Arc::new(Smp { l2, hci, bus, bonds, own, st: Mutex::new(HashMap::new()) })
     }
 
@@ -412,7 +418,13 @@ impl Smp {
     }
 
     pub fn cancel_device(&self, device: &DeviceId) {
-        let handle = self.st.lock().unwrap().iter().find(|(_, c)| c.device == *device && c.stage != Stage::Idle).map(|(h, _)| *h);
+        let handle = self
+            .st
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, c)| c.device == *device && c.stage != Stage::Idle)
+            .map(|(h, _)| *h);
         if let Some(h) = handle {
             self.cancel(h);
         }
@@ -893,7 +905,8 @@ mod tests {
         let events = bus.subscribe();
         let own = Address([0x06, 0x05, 0x04, 0x03, 0x02, 0x01]);
         let smp = Smp::new(l2.clone(), hci.clone(), bus.clone(), bonds.clone(), own);
-        let peer = DeviceId { address: Address([0xB6, 0xB5, 0xB4, 0xB3, 0xB2, 0xB1]), address_type: AddressType::LePublic };
+        let peer =
+            DeviceId { address: Address([0xB6, 0xB5, 0xB4, 0xB3, 0xB2, 0xB1]), address_type: AddressType::LePublic };
         l2.set_device(HANDLE, peer);
         smp.attach(HANDLE, peer);
 

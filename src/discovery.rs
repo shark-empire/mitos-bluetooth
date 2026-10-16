@@ -182,7 +182,11 @@ impl DiscoveryManager {
             let (class, rssi, eir) = match kind {
                 0x02 => (u32::from_le_bytes([ev.u8(p + 3), ev.u8(p + 4), ev.u8(p + 5), 0]), 0, None),
                 0x22 => (u32::from_le_bytes([ev.u8(p + 2), ev.u8(p + 3), ev.u8(p + 4), 0]), ev.u8(p + 7) as i8, None),
-                _ => (u32::from_le_bytes([ev.u8(p + 2), ev.u8(p + 3), ev.u8(p + 4), 0]), ev.u8(p + 7) as i8, Some(ev.bytes(p + 8, 240).to_vec())),
+                _ => (
+                    u32::from_le_bytes([ev.u8(p + 2), ev.u8(p + 3), ev.u8(p + 4), 0]),
+                    ev.u8(p + 7) as i8,
+                    Some(ev.bytes(p + 8, 240).to_vec()),
+                ),
             };
             off += record_len;
             self.upsert(DeviceId { address: addr, address_type: AddressType::Bredr }, rssi, eir, class);

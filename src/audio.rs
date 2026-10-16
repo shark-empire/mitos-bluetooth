@@ -9,17 +9,20 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const UUID_HFP_HF: u16 = 0x111e; // headset advertising the Handsfree role
 const UUID_HSP_HS: u16 = 0x1108; // headset advertising the Headset role
-const AG_FEATURES: u32 = 0xC2;   // EC/NR + enhanced call status/control + extended error codes
+const AG_FEATURES: u32 = 0xC2; // EC/NR + enhanced call status/control + extended error codes
 
 /// Fed with every message read from a client socket.
 type RxCallback = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+/// A command waiting for its answer: transaction label, where the result goes, and when it was sent.
+type PendingReply = (u8, Sender<Result<Vec<u8>>>, Instant);
 
 mod avdtp {
     pub const DISCOVER: u8 = 0x01;
@@ -52,18 +55,23 @@ const SCO_PKT_TYPES: u16 = 0x03FF;
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SbcConfig {
-    pub frequency: u8,   // one-hot: 0x80=16k, 0x40=32k, 0x20=44.1k, 0x10=48k
-    pub mode: u8,        // 0x08=mono, 0x04=dual, 0x02=stereo, 0x01=joint
-    pub blocks: u8,      // 0x80=4, 0x40=8, 0x20=12, 0x10=16
-    pub subbands: u8,    // 0x08=4, 0x04=8
-    pub allocation: u8,  // 0x01=loudness, 0x02=snr
+    pub frequency: u8,  // one-hot: 0x80=16k, 0x40=32k, 0x20=44.1k, 0x10=48k
+    pub mode: u8,       // 0x08=mono, 0x04=dual, 0x02=stereo, 0x01=joint
+    pub blocks: u8,     // 0x80=4, 0x40=8, 0x20=12, 0x10=16
+    pub subbands: u8,   // 0x08=4, 0x04=8
+    pub allocation: u8, // 0x01=loudness, 0x02=snr
     pub bitpool: u8,
     pub min_bp: u8,
 }
 
 impl SbcConfig {
     pub fn samples_per_frame(&self) -> u32 {
-        let blocks = match self.blocks { 0x80 => 4, 0x40 => 8, 0x20 => 12, _ => 16 };
+        let blocks = match self.blocks {
+            0x80 => 4,
+            0x40 => 8,
+            0x20 => 12,
+            _ => 16,
+        };
         let sub = if self.subbands == 0x08 { 4 } else { 8 };
         (blocks * sub) as u32
     }
@@ -72,14 +80,53 @@ impl SbcConfig {
     }
     /// Choose a configuration from the sink's 4-byte SBC capabilities.
     pub fn pick(caps: &[u8; 4]) -> Option<SbcConfig> {
-        let frequency = if caps[0] & 0x20 != 0 { 0x20 } else if caps[0] & 0x10 != 0 { 0x10 }
-                        else if caps[0] & 0x40 != 0 { 0x40 } else if caps[0] & 0x80 != 0 { 0x80 } else { return None };
-        let mode = if caps[0] & 0x01 != 0 { 0x01 } else if caps[0] & 0x02 != 0 { 0x02 }
-                   else if caps[0] & 0x08 != 0 { 0x08 } else if caps[0] & 0x04 != 0 { 0x04 } else { return None };
-        let blocks = if caps[1] & 0x10 != 0 { 0x10 } else if caps[1] & 0x80 != 0 { 0x80 }
-                     else if caps[1] & 0x40 != 0 { 0x40 } else if caps[1] & 0x20 != 0 { 0x20 } else { return None };
-        let subbands = if caps[1] & 0x04 != 0 { 0x04 } else if caps[1] & 0x08 != 0 { 0x08 } else { return None };
-        let allocation = if caps[1] & 0x01 != 0 { 0x01 } else if caps[1] & 0x02 != 0 { 0x02 } else { return None }; // loudness preferred
+        let frequency = if caps[0] & 0x20 != 0 {
+            0x20
+        } else if caps[0] & 0x10 != 0 {
+            0x10
+        } else if caps[0] & 0x40 != 0 {
+            0x40
+        } else if caps[0] & 0x80 != 0 {
+            0x80
+        } else {
+            return None;
+        };
+        let mode = if caps[0] & 0x01 != 0 {
+            0x01
+        } else if caps[0] & 0x02 != 0 {
+            0x02
+        } else if caps[0] & 0x08 != 0 {
+            0x08
+        } else if caps[0] & 0x04 != 0 {
+            0x04
+        } else {
+            return None;
+        };
+        let blocks = if caps[1] & 0x10 != 0 {
+            0x10
+        } else if caps[1] & 0x80 != 0 {
+            0x80
+        } else if caps[1] & 0x40 != 0 {
+            0x40
+        } else if caps[1] & 0x20 != 0 {
+            0x20
+        } else {
+            return None;
+        };
+        let subbands = if caps[1] & 0x04 != 0 {
+            0x04
+        } else if caps[1] & 0x08 != 0 {
+            0x08
+        } else {
+            return None;
+        };
+        let allocation = if caps[1] & 0x01 != 0 {
+            0x01
+        } else if caps[1] & 0x02 != 0 {
+            0x02
+        } else {
+            return None;
+        }; // loudness preferred
         let (min_bp, max_bp) = (caps[2], caps[3]);
         let bitpool = if min_bp <= max_bp { 53u8.clamp(min_bp, max_bp) } else { max_bp };
         Some(SbcConfig { frequency, mode, blocks, subbands, allocation, bitpool, min_bp })
@@ -116,12 +163,20 @@ pub struct A2dpSession {
     pub seq: u16,
     pub ts: u32,
     pub ssrc: u32,
-    pub delay_ms: Arc<Mutex<Option<u32>>>,   // sink-reported render delay (AVDTP Delay Report)
-    pub sock: Option<Arc<BinSock>>,          // per-speaker media socket (created on start)
+    pub delay_ms: Arc<Mutex<Option<u32>>>, // sink-reported render delay (AVDTP Delay Report)
+    pub sock: Option<Arc<BinSock>>,        // per-speaker media socket (created on start)
     pub socket_path: Option<String>,
 }
-pub struct AvrcpSession { pub cid: u16, pub ctl: Sender<AvrMsg> }
-pub struct HfpSession { pub cid: u16, pub is_hsp: bool, pub volume: u8, pub mic_volume: u8 }
+pub struct AvrcpSession {
+    pub cid: u16,
+    pub ctl: Sender<AvrMsg>,
+}
+pub struct HfpSession {
+    pub cid: u16,
+    pub is_hsp: bool,
+    pub volume: u8,
+    pub mic_volume: u8,
+}
 
 // ===================== small binary-socket helper =====================
 // Protocol: [2-byte BE length][payload], both directions. Used by the A2DP and SCO bridges.
@@ -134,8 +189,8 @@ pub struct BinSock {
 
 impl BinSock {
     fn start(path: String, on_rx: RxCallback) -> Arc<Self> {
-        let sock = Arc::new(BinSock { clients: Mutex::new(Vec::new()),
-                                      running: AtomicBool::new(true), path: path.clone() });
+        let sock =
+            Arc::new(BinSock { clients: Mutex::new(Vec::new()), running: AtomicBool::new(true), path: path.clone() });
         let s = sock.clone();
         std::thread::spawn(move || {
             let _ = std::fs::remove_file(&path);
@@ -145,21 +200,29 @@ impl BinSock {
                 while s.running.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((c, _)) => {
-                            if let Ok(bc) = c.try_clone() { s.clients.lock().unwrap().push(bc); }
+                            if let Ok(bc) = c.try_clone() {
+                                s.clients.lock().unwrap().push(bc);
+                            }
                             let on = on_rx.clone();
                             std::thread::spawn(move || {
                                 let mut c = c;
                                 loop {
                                     let mut len = [0u8; 2];
-                                    if c.read_exact(&mut len).is_err() { break; }
+                                    if c.read_exact(&mut len).is_err() {
+                                        break;
+                                    }
                                     let n = u16::from_be_bytes(len) as usize;
                                     let mut buf = vec![0u8; n];
-                                    if n > 0 && c.read_exact(&mut buf).is_err() { break; }
+                                    if n > 0 && c.read_exact(&mut buf).is_err() {
+                                        break;
+                                    }
                                     on(&buf);
                                 }
                             });
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(200)),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(200))
+                        }
                         Err(_) => break,
                     }
                 }
@@ -201,20 +264,27 @@ impl AudioManager {
         let st: Arc<Mutex<HashMap<DeviceId, AudioSession>>> = Arc::new(Mutex::new(HashMap::new()));
         // adapter 0 keeps the historical names; further adapters get their own so they do not steal each other's socket
         let suffix = if hci.index() == 0 { String::new() } else { format!("-hci{}", hci.index()) };
-        let a2dp_path = std::env::var("MITOS_A2DP_SOCK").unwrap_or_else(|_| format!("/tmp/mitos-bluetooth-a2dp{suffix}.sock"));
-        let sco_path = std::env::var("MITOS_SCO_SOCK").unwrap_or_else(|_| format!("/tmp/mitos-bluetooth-sco{suffix}.sock"));
+        let a2dp_path =
+            std::env::var("MITOS_A2DP_SOCK").unwrap_or_else(|_| format!("/tmp/mitos-bluetooth-a2dp{suffix}.sock"));
+        let sco_path =
+            std::env::var("MITOS_SCO_SOCK").unwrap_or_else(|_| format!("/tmp/mitos-bluetooth-sco{suffix}.sock"));
 
         // A2DP media socket: message = [frame count u8][SBC frames for one RTP packet]
         let l2c = l2.clone();
         let stc = st.clone();
         let a2dp_on: RxCallback = Arc::new(move |data: &[u8]| {
-            if data.is_empty() { return; }
+            if data.is_empty() {
+                return;
+            }
             let nframes = data[0] as u32;
             let frames = &data[1..];
             let mut st = stc.lock().unwrap();
             for s in st.values_mut() {
                 if let Some(a) = s.a2dp.as_mut() {
-                    if a.started { let _ = send_media_packet(&l2c, a, frames, nframes); break; }
+                    if a.started {
+                        let _ = send_media_packet(&l2c, a, frames, nframes);
+                        break;
+                    }
                 }
             }
         });
@@ -225,14 +295,18 @@ impl AudioManager {
         let stc2 = st.clone();
         let sco_on: RxCallback = Arc::new(move |data: &[u8]| {
             let h = stc2.lock().unwrap().values().find_map(|s| s.sco_handle);
-            if let Some(h) = h { let _ = hcic.send_sco(h, data); }
+            if let Some(h) = h {
+                let _ = hcic.send_sco(h, data);
+            }
         });
         let sco_sock = BinSock::start(sco_path, sco_on);
         let (sctx, scrx) = channel::<(u16, Vec<u8>)>();
         hci.set_sco_handler(sctx);
         let bc = sco_sock.clone();
         std::thread::spawn(move || {
-            while let Ok((_h, d)) = scrx.recv() { bc.broadcast(&d); }
+            while let Ok((_h, d)) = scrx.recv() {
+                bc.broadcast(&d);
+            }
         });
 
         Arc::new(AudioManager { hci, l2, devices, bus, st, a2dp_sock, sco_sock })
@@ -252,8 +326,18 @@ impl AudioManager {
     /// Look up (or create) a device's session within an *already-locked* map, so the
     /// returned `&mut AudioSession` borrows from the caller's own guard rather than one
     /// local to this function (which would be dropped before the reference could be used).
-    fn session_entry<'a>(st: &'a mut HashMap<DeviceId, AudioSession>, device: &DeviceId, handle: u16) -> &'a mut AudioSession {
-        st.entry(*device).or_insert_with(|| AudioSession { conn_handle: handle, a2dp: None, avrcp: None, hfp: None, sco_handle: None })
+    fn session_entry<'a>(
+        st: &'a mut HashMap<DeviceId, AudioSession>,
+        device: &DeviceId,
+        handle: u16,
+    ) -> &'a mut AudioSession {
+        st.entry(*device).or_insert_with(|| AudioSession {
+            conn_handle: handle,
+            a2dp: None,
+            avrcp: None,
+            hfp: None,
+            sco_handle: None,
+        })
     }
 
     // ===================== A2DP (AVDTP source role) =====================
@@ -270,13 +354,24 @@ impl AudioManager {
             }
         };
         let mut ssrc = [0u8; 4];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") { let _ = f.read_exact(&mut ssrc); }
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            let _ = f.read_exact(&mut ssrc);
+        }
         let mut guard = self.st.lock().unwrap();
         let s = Self::session_entry(&mut guard, device, handle);
         s.a2dp = Some(A2dpSession {
-            sig, sig_cid, media_cid, seid, cfg,
-            started: false, seq: 0, ts: 0, ssrc: u32::from_le_bytes(ssrc),
-            delay_ms, sock: None, socket_path: None,
+            sig,
+            sig_cid,
+            media_cid,
+            seid,
+            cfg,
+            started: false,
+            seq: 0,
+            ts: 0,
+            ssrc: u32::from_le_bytes(ssrc),
+            delay_ms,
+            sock: None,
+            socket_path: None,
         });
         self.bus.publish(Event::A2dpStateChanged { id: *device, state: "open".into() });
         Ok(())
@@ -287,8 +382,9 @@ impl AudioManager {
         // 1. find a free audio sink endpoint. Each entry is 2 bytes:
         //    [ACP SEID << 2 | in-use << 1] [media type << 4 | TSEP << 3] with TSEP 1 = sink
         let seps = avdtp_cmd(sig, avdtp::DISCOVER, &[])?;
-        let seid = seps
-            .chunks_exact(2)
+        let (pairs, _) = seps.as_chunks::<2>();
+        let seid = pairs
+            .iter()
             .find_map(|pair| {
                 let in_use = pair[0] & 0x02 != 0;
                 let audio = pair[1] >> 4 == 0;
@@ -302,7 +398,8 @@ impl AudioManager {
             Err(_) => avdtp_cmd(sig, avdtp::GET_CAPABILITIES, &[seid << 2])?,
         };
         let sbc_caps = parse_sbc_caps(&caps).ok_or_else(|| Error::NotSupported("sink does not support SBC".into()))?;
-        let cfg = SbcConfig::pick(&sbc_caps).ok_or_else(|| Error::NotSupported("no usable SBC configuration".into()))?;
+        let cfg =
+            SbcConfig::pick(&sbc_caps).ok_or_else(|| Error::NotSupported("no usable SBC configuration".into()))?;
         // 3. configure + open
         let mut p = vec![seid << 2, 1 << 2]; // ACP SEID, our (INT) SEID
         p.extend_from_slice(&[avdtp::CAT_MEDIA_TRANSPORT, 0x00]);
@@ -318,17 +415,22 @@ impl AudioManager {
         Ok((seid, cfg, media_cid))
     }
 
-      pub fn a2dp_start(&self, device: &DeviceId) -> Result<()> {
+    pub fn a2dp_start(&self, device: &DeviceId) -> Result<()> {
         let (sig, seid) = {
             let st = self.st.lock().unwrap();
-            let a = st.get(device).and_then(|s| s.a2dp.as_ref()).ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
+            let a = st
+                .get(device)
+                .and_then(|s| s.a2dp.as_ref())
+                .ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
             (a.sig.clone(), a.seid)
         };
         avdtp_cmd(&sig, avdtp::START, &[seid << 2])?;
         let socket_path;
         {
             let mut st = self.st.lock().unwrap();
-            let a = st.get_mut(device).and_then(|s| s.a2dp.as_mut())
+            let a = st
+                .get_mut(device)
+                .and_then(|s| s.a2dp.as_mut())
                 .ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
             a.started = true;
             if a.sock.is_none() {
@@ -339,7 +441,9 @@ impl AudioManager {
                 let stc = self.st.clone();
                 let dev = *device;
                 let on: RxCallback = Arc::new(move |data: &[u8]| {
-                    if data.is_empty() { return; }
+                    if data.is_empty() {
+                        return;
+                    }
                     let nframes = data[0] as u32;
                     let frames = &data[1..];
                     if let Some(a) = stc.lock().unwrap().get_mut(&dev).and_then(|s| s.a2dp.as_mut()) {
@@ -352,14 +456,19 @@ impl AudioManager {
             socket_path = a.socket_path.clone();
         }
         self.bus.publish(Event::A2dpStateChanged { id: *device, state: "started".into() });
-        if let Some(p) = socket_path { self.bus.publish(Event::A2dpStreamReady { id: *device, socket_path: p }); }
+        if let Some(p) = socket_path {
+            self.bus.publish(Event::A2dpStreamReady { id: *device, socket_path: p });
+        }
         Ok(())
     }
 
-        pub fn a2dp_suspend(&self, device: &DeviceId) -> Result<()> {
+    pub fn a2dp_suspend(&self, device: &DeviceId) -> Result<()> {
         let (sig, seid) = {
             let st = self.st.lock().unwrap();
-            let a = st.get(device).and_then(|s| s.a2dp.as_ref()).ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
+            let a = st
+                .get(device)
+                .and_then(|s| s.a2dp.as_ref())
+                .ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
             (a.sig.clone(), a.seid)
         };
         avdtp_cmd(&sig, avdtp::SUSPEND, &[seid << 2])?;
@@ -367,7 +476,9 @@ impl AudioManager {
             let mut st = self.st.lock().unwrap();
             if let Some(a) = st.get_mut(device).and_then(|s| s.a2dp.as_mut()) {
                 a.started = false;
-                if let Some(sock) = a.sock.take() { sock.stop(); }
+                if let Some(sock) = a.sock.take() {
+                    sock.stop();
+                }
                 a.socket_path = None;
             }
         }
@@ -383,7 +494,9 @@ impl AudioManager {
         // Read the delay into a local first: a guard temporary in the tail expression would outlive `st` (E0597).
         let delay_ms = *a.delay_ms.lock().unwrap();
         Some(A2dpInfo {
-            started: a.started, config: a.cfg, mtu,
+            started: a.started,
+            config: a.cfg,
+            mtu,
             max_packet_payload: mtu.saturating_sub(RTP_OVERHEAD),
             delay_ms,
             socket_path: a.socket_path.clone(),
@@ -393,7 +506,9 @@ impl AudioManager {
     /// Send pre-encoded SBC frames (one RTP packet's worth). `nframes` advances RTP timestamps.
     pub fn a2dp_send_sbc(&self, device: &DeviceId, frames: &[u8], nframes: u32) -> Result<()> {
         let mut st = self.st.lock().unwrap();
-        let a = st.get_mut(device).and_then(|s| s.a2dp.as_mut())
+        let a = st
+            .get_mut(device)
+            .and_then(|s| s.a2dp.as_mut())
             .ok_or_else(|| Error::InvalidState("a2dp not connected".into()))?;
         send_media_packet(&self.l2, a, frames, nframes)
     }
@@ -458,22 +573,31 @@ impl AudioManager {
         let bus = self.bus.clone();
         let st = self.st.clone();
         let dev = *device;
-        std::thread::Builder::new().name("hfp-at".into()).spawn(move || {
-            let mut buf: Vec<u8> = Vec::new();
-            loop {
-                match rf.recv_timeout(Duration::from_secs(1)) {
-                    Ok(data) => {
-                        buf.extend_from_slice(&data);
-                        while let Some(pos) = buf.iter().position(|&b| b == b'\r') {
-                            let line: Vec<u8> = buf.drain(..=pos).collect();
-                            handle_at(&rf, &l2, &bus, &st, &dev, &line[..line.len() - 1]);
+        std::thread::Builder::new()
+            .name("hfp-at".into())
+            .spawn(move || {
+                let mut buf: Vec<u8> = Vec::new();
+                loop {
+                    match rf.recv_timeout(Duration::from_secs(1)) {
+                        Ok(data) => {
+                            buf.extend_from_slice(&data);
+                            while let Some(pos) = buf.iter().position(|&b| b == b'\r') {
+                                let line: Vec<u8> = buf.drain(..=pos).collect();
+                                handle_at(&rf, &l2, &bus, &st, &dev, &line[..line.len() - 1]);
+                            }
+                        }
+                        Err(_) => {
+                            if rf.is_closed() {
+                                break;
+                            } else {
+                                continue;
+                            }
                         }
                     }
-                    Err(_) => if rf.is_closed() { break } else { continue },
                 }
-            }
-            st.lock().unwrap().get_mut(&dev).and_then(|s| s.hfp.take());
-        }).ok();
+                st.lock().unwrap().get_mut(&dev).and_then(|s| s.hfp.take());
+            })
+            .ok();
         let mut guard = self.st.lock().unwrap();
         let s = Self::session_entry(&mut guard, device, handle);
         s.hfp = Some(HfpSession { cid, is_hsp, volume: 9, mic_volume: 9 });
@@ -484,8 +608,14 @@ impl AudioManager {
 
     /// We initiate the voice connection (HCI Setup Synchronous Connection on the ACL handle).
     pub fn hfp_connect_sco(&self, device: &DeviceId) -> Result<()> {
-        let h = { self.st.lock().unwrap().get(device).map(|s| s.conn_handle)
-            .ok_or_else(|| Error::InvalidState("no audio session".into()))? };
+        let h = {
+            self.st
+                .lock()
+                .unwrap()
+                .get(device)
+                .map(|s| s.conn_handle)
+                .ok_or_else(|| Error::InvalidState("no audio session".into()))?
+        };
         let mut p = h.to_le_bytes().to_vec();
         p.extend_from_slice(&SCO_TX_BW.to_le_bytes());
         p.extend_from_slice(&SCO_TX_BW.to_le_bytes());
@@ -497,8 +627,14 @@ impl AudioManager {
     }
 
     pub fn hfp_disconnect_sco(&self, device: &DeviceId) -> Result<()> {
-        let h = { self.st.lock().unwrap().get(device).and_then(|s| s.sco_handle)
-            .ok_or_else(|| Error::InvalidState("no SCO connection".into()))? };
+        let h = {
+            self.st
+                .lock()
+                .unwrap()
+                .get(device)
+                .and_then(|s| s.sco_handle)
+                .ok_or_else(|| Error::InvalidState("no SCO connection".into()))?
+        };
         let mut p = h.to_le_bytes().to_vec();
         p.push(0x13);
         self.hci.command_status(op::DISCONNECT, &p)
@@ -507,7 +643,9 @@ impl AudioManager {
     /// Called by ConnectionManager when the *device* initiates a SCO connection.
     pub fn accept_sync(&self, addr: &Address) -> bool {
         let found = { self.st.lock().unwrap().iter().any(|(id, s)| id.address == *addr && s.hfp.is_some()) };
-        if !found { return false; }
+        if !found {
+            return false;
+        }
         let mut p = addr.0.to_vec();
         p.extend_from_slice(&SCO_TX_BW.to_le_bytes());
         p.extend_from_slice(&SCO_TX_BW.to_le_bytes());
@@ -526,7 +664,9 @@ impl AudioManager {
         let dev = { self.st.lock().unwrap().keys().find(|id| id.address == addr).copied() };
         if let Some(id) = dev {
             if status == 0 {
-                if let Some(s) = self.st.lock().unwrap().get_mut(&id) { s.sco_handle = Some(handle); }
+                if let Some(s) = self.st.lock().unwrap().get_mut(&id) {
+                    s.sco_handle = Some(handle);
+                }
                 self.bus.publish(Event::ScoStateChanged { id, connected: true });
             } else {
                 eprintln!("[audio] SCO connection failed: status 0x{status:02x}");
@@ -541,13 +681,19 @@ impl AudioManager {
         let session = self.st.lock().unwrap().remove(device);
         if let Some(mut s) = session {
             if let Some(mut a) = s.a2dp.take() {
-                if let Some(sock) = a.sock.take() { sock.stop(); }
+                if let Some(sock) = a.sock.take() {
+                    sock.stop();
+                }
                 let _ = avdtp_cmd(&a.sig, avdtp::CLOSE, &[a.seid << 2]);
                 let _ = self.l2.disconnect(a.media_cid);
                 let _ = self.l2.disconnect(a.sig_cid);
             }
-            if let Some(v) = s.avrcp.take() { let _ = self.l2.disconnect(v.cid); }
-            if let Some(h) = s.hfp.take() { let _ = self.l2.disconnect(h.cid); }
+            if let Some(v) = s.avrcp.take() {
+                let _ = self.l2.disconnect(v.cid);
+            }
+            if let Some(h) = s.hfp.take() {
+                let _ = self.l2.disconnect(h.cid);
+            }
             if let Some(h) = s.sco_handle.take() {
                 let mut p = h.to_le_bytes().to_vec();
                 p.push(0x13);
@@ -560,8 +706,15 @@ impl AudioManager {
 
 // ===================== AVDTP internals =====================
 
-pub struct SigCmd { signal: u8, payload: Vec<u8>, reply: Sender<Result<Vec<u8>>> }
-pub enum SigMsg { Cmd(SigCmd), Pkt(L2Packet) }
+pub struct SigCmd {
+    signal: u8,
+    payload: Vec<u8>,
+    reply: Sender<Result<Vec<u8>>>,
+}
+pub enum SigMsg {
+    Cmd(SigCmd),
+    Pkt(L2Packet),
+}
 
 /// Sequential AVDTP signaling actor per session: matches responses by transaction label.
 fn spawn_sig_actor(l2: Arc<L2cap>, cid: u16, delay_ms: Arc<Mutex<Option<u32>>>) -> Sender<SigMsg> {
@@ -569,58 +722,82 @@ fn spawn_sig_actor(l2: Arc<L2cap>, cid: u16, delay_ms: Arc<Mutex<Option<u32>>>) 
     let (ptx, prx) = channel::<L2Packet>();
     l2.register_handler(cid, ptx);
     let ftx = mux_tx.clone();
-    std::thread::spawn(move || while let Ok(p) = prx.recv() { let _ = ftx.send(SigMsg::Pkt(p)); });
-    std::thread::Builder::new().name("avdtp".into()).spawn(move || {
-        let mut tl: u8 = 0;
-        let mut waiting: Option<(u8, Sender<Result<Vec<u8>>>, Instant)> = None;
-        while let Ok(m) = mux_rx.recv() {
-            // a command whose answer never came must not wedge the session
-            if waiting.as_ref().is_some_and(|(_, _, t0)| t0.elapsed() > Duration::from_secs(6)) { waiting = None; }
-            match m {
-                SigMsg::Pkt(p) => {
-                    if p.closed { break; }
-                    let d = &p.data;
-                    if d.len() < 2 { continue; }
-                    // byte 0: transaction label (4) | packet type (2) | message type (2); byte 1: RFA (2) | signal id (6)
-                    let t = d[0] >> 4;
-                    let mt = d[0] & 0x03;
-                    let signal = d[1] & 0x3f;
-                    if mt != 0 {
-                        // answer to our command: 2 = accept, 3 = reject, 1 = general reject
-                        if let Some((wtl, reply, t0)) = waiting.take() {
-                            if t == wtl {
-                                let body = d[2..].to_vec();
-                                let _ = reply.send(if mt == 2 { Ok(body) } else {
-                                    // the error code is the last byte (SET_CONFIGURATION rejects name the category first)
-                                    Err(Error::ConnectionFailed(format!("avdtp reject: code 0x{:02x}", body.last().copied().unwrap_or(0))))
-                                });
-                            } else {
-                                waiting = Some((wtl, reply, t0));
-                            }
-                        }
-                        continue;
-                    }
-                    // commands from the sink
-                    if signal == avdtp::DELAY_REPORT && d.len() >= 5 {
-                        // [ACP SEID << 2][delay: u16, tenths of ms]
-                        let tenths = u16::from_be_bytes([d[3], d[4]]);
-                        *delay_ms.lock().unwrap() = Some(u32::from(tenths) / 10);
-                        let _ = l2.send(cid, &[(t << 4) | 0x02, signal]); // accept
-                    } else {
-                        let _ = l2.send(cid, &[(t << 4) | 0x01, signal]); // general reject: not supported
-                    }
+    std::thread::spawn(move || {
+        while let Ok(p) = prx.recv() {
+            let _ = ftx.send(SigMsg::Pkt(p));
+        }
+    });
+    std::thread::Builder::new()
+        .name("avdtp".into())
+        .spawn(move || {
+            let mut tl: u8 = 0;
+            let mut waiting: Option<PendingReply> = None;
+            while let Ok(m) = mux_rx.recv() {
+                // a command whose answer never came must not wedge the session
+                if waiting.as_ref().is_some_and(|(_, _, t0)| t0.elapsed() > Duration::from_secs(6)) {
+                    waiting = None;
                 }
-                SigMsg::Cmd(c) => {
-                    if waiting.is_some() { let _ = c.reply.send(Err(Error::InvalidState("avdtp busy".into()))); continue; }
-                    tl = (tl + 1) & 0x0F;
-                    let mut pkt = vec![tl << 4, c.signal]; // single packet, command
-                    pkt.extend_from_slice(&c.payload);
-                    if l2.send(cid, &pkt).is_ok() { waiting = Some((tl, c.reply, Instant::now())); }
-                    else { let _ = c.reply.send(Err(Error::TransportClosed)); }
+                match m {
+                    SigMsg::Pkt(p) => {
+                        if p.closed {
+                            break;
+                        }
+                        let d = &p.data;
+                        if d.len() < 2 {
+                            continue;
+                        }
+                        // byte 0: transaction label (4) | packet type (2) | message type (2); byte 1: RFA (2) | signal id (6)
+                        let t = d[0] >> 4;
+                        let mt = d[0] & 0x03;
+                        let signal = d[1] & 0x3f;
+                        if mt != 0 {
+                            // answer to our command: 2 = accept, 3 = reject, 1 = general reject
+                            if let Some((wtl, reply, t0)) = waiting.take() {
+                                if t == wtl {
+                                    let body = d[2..].to_vec();
+                                    let _ = reply.send(if mt == 2 {
+                                        Ok(body)
+                                    } else {
+                                        // the error code is the last byte (SET_CONFIGURATION rejects name the category first)
+                                        Err(Error::ConnectionFailed(format!(
+                                            "avdtp reject: code 0x{:02x}",
+                                            body.last().copied().unwrap_or(0)
+                                        )))
+                                    });
+                                } else {
+                                    waiting = Some((wtl, reply, t0));
+                                }
+                            }
+                            continue;
+                        }
+                        // commands from the sink
+                        if signal == avdtp::DELAY_REPORT && d.len() >= 5 {
+                            // [ACP SEID << 2][delay: u16, tenths of ms]
+                            let tenths = u16::from_be_bytes([d[3], d[4]]);
+                            *delay_ms.lock().unwrap() = Some(u32::from(tenths) / 10);
+                            let _ = l2.send(cid, &[(t << 4) | 0x02, signal]); // accept
+                        } else {
+                            let _ = l2.send(cid, &[(t << 4) | 0x01, signal]); // general reject: not supported
+                        }
+                    }
+                    SigMsg::Cmd(c) => {
+                        if waiting.is_some() {
+                            let _ = c.reply.send(Err(Error::InvalidState("avdtp busy".into())));
+                            continue;
+                        }
+                        tl = (tl + 1) & 0x0F;
+                        let mut pkt = vec![tl << 4, c.signal]; // single packet, command
+                        pkt.extend_from_slice(&c.payload);
+                        if l2.send(cid, &pkt).is_ok() {
+                            waiting = Some((tl, c.reply, Instant::now()));
+                        } else {
+                            let _ = c.reply.send(Err(Error::TransportClosed));
+                        }
+                    }
                 }
             }
-        }
-    }).ok();
+        })
+        .ok();
     mux_tx
 }
 
@@ -650,7 +827,9 @@ fn parse_sbc_caps(payload: &[u8]) -> Option<[u8; 4]> {
 fn caps_has_category(payload: &[u8], cat: u8) -> bool {
     let mut i = 0;
     while i + 2 <= payload.len() {
-        if payload[i] == cat { return true; }
+        if payload[i] == cat {
+            return true;
+        }
         i += 2 + usize::from(payload[i + 1]);
     }
     false
@@ -669,15 +848,18 @@ fn rtp_packet(seq: u16, ts: u32, ssrc: u32, nframes: u32, frames: &[u8]) -> Vec<
     pkt
 }
 
-
 /// Wrap pre-encoded SBC frames in RTP and send on the media channel.
 fn send_media_packet(l2: &L2cap, a: &mut A2dpSession, frames: &[u8], nframes: u32) -> Result<()> {
-    if !a.started { return Err(Error::InvalidState("stream not started".into())); }
+    if !a.started {
+        return Err(Error::InvalidState("stream not started".into()));
+    }
     let pkt = rtp_packet(a.seq, a.ts, a.ssrc, nframes, frames);
     let mtu = l2.remote_mtu(a.media_cid);
     if pkt.len() > usize::from(mtu) {
         return Err(Error::InvalidArgument(format!(
-            "media packet {} bytes > sink MTU {mtu}; send fewer frames per packet", pkt.len())));
+            "media packet {} bytes > sink MTU {mtu}; send fewer frames per packet",
+            pkt.len()
+        )));
     }
     l2.send(a.media_cid, &pkt)?;
     a.seq = a.seq.wrapping_add(1);
@@ -705,12 +887,19 @@ fn set_absolute_volume_frame(volume: u8) -> Vec<u8> {
 }
 
 /// AVRCP RegisterNotification(EVENT_VOLUME_CHANGED): NOTIFY, PDU 0x31, parameter length 5 = event id + 4 bytes playback interval.
-const VOLUME_CHANGED_REGISTRATION: [u8; 15] = [0x03, 0x48, 0x00, 0x00, 0x19, 0x58, 0x31, 0x00, 0x00, 0x05, 0x0d, 0, 0, 0, 0];
+const VOLUME_CHANGED_REGISTRATION: [u8; 15] =
+    [0x03, 0x48, 0x00, 0x00, 0x19, 0x58, 0x31, 0x00, 0x00, 0x05, 0x0d, 0, 0, 0, 0];
 
 // ===================== AVRCP internals =====================
 
-pub struct AvrcpCmd { avc: Vec<u8>, reply: Option<Sender<Result<Vec<u8>>>> }
-pub enum AvrMsg { Cmd(AvrcpCmd), Pkt(L2Packet) }
+pub struct AvrcpCmd {
+    avc: Vec<u8>,
+    reply: Option<Sender<Result<Vec<u8>>>>,
+}
+pub enum AvrMsg {
+    Cmd(AvrcpCmd),
+    Pkt(L2Packet),
+}
 
 /// AVRCP controller actor. Handles: command/response matching by transaction label,
 /// VOLUME_CHANGED notifications (interim + final, with re-registration), and answers
@@ -720,93 +909,132 @@ fn spawn_avrcp_actor(l2: Arc<L2cap>, cid: u16, device: DeviceId, bus: Arc<EventB
     let (ptx, prx) = channel::<L2Packet>();
     l2.register_handler(cid, ptx);
     let ftx = mux_tx.clone();
-    std::thread::spawn(move || while let Ok(p) = prx.recv() { let _ = ftx.send(AvrMsg::Pkt(p)); });
-    std::thread::Builder::new().name("avrcp".into()).spawn(move || {
-        let mut tl: u8 = 0;
-        let mut waiting: Option<(u8, Sender<Result<Vec<u8>>>, Instant)> = None;
-        let mut notify_tl: Option<u8> = None;
-        let send_avctp = |tl: u8, response: bool, avc: &[u8]| -> Result<()> { l2.send(cid, &avctp_packet(tl, response, avc)) };
-        let register = |tl: &mut u8, notify_tl: &mut Option<u8>| {
-            *tl = (*tl + 1) & 0x0F;
-            if send_avctp(*tl, false, &VOLUME_CHANGED_REGISTRATION).is_ok() { *notify_tl = Some(*tl); }
-        };
-        register(&mut tl, &mut notify_tl); // initial subscription
-        while let Ok(m) = mux_rx.recv() {
-            if waiting.as_ref().is_some_and(|(_, _, t0)| t0.elapsed() > Duration::from_secs(6)) { waiting = None; }
-            match m {
-                AvrMsg::Pkt(p) => {
-                    if p.closed { break; }
-                    let d = &p.data;
-                    if d.len() < 4 { continue; }
-                    // AVCTP: [label << 4 | packet type << 2 | C/R << 1 | IPID][PID hi][PID lo], then the AV/C frame
-                    let t = d[0] >> 4;
-                    let is_response = (d[0] >> 1) & 1 == 1;
-                    let avc = &d[3..];
-                    if !is_response {
-                        // a command from the device: [ctype][subunit][opcode][operands...]
-                        if avc.len() >= 5 && avc[2] == 0x7c {
-                            // PASS THROUGH: a button on the speaker (operation id | released << 7)
-                            let released = avc[3] & 0x80 != 0;
-                            if !released {
-                                if let Some(name) = avrcp_op_name(avc[3] & 0x7f) {
-                                    bus.publish(Event::MediaCommand { id: device, command: name.to_string() });
-                                }
-                            }
-                            let _ = send_avctp(t, true, &[0x09, avc[1], 0x7c, avc[3], avc[4]]); // ACCEPTED
-                        } else if avc.len() >= 3 {
-                            // anything else: NOT IMPLEMENTED (the same frame with response code 0x08)
-                            let mut r = avc.to_vec();
-                            r[0] = 0x08;
-                            let _ = send_avctp(t, true, &r);
+    std::thread::spawn(move || {
+        while let Ok(p) = prx.recv() {
+            let _ = ftx.send(AvrMsg::Pkt(p));
+        }
+    });
+    std::thread::Builder::new()
+        .name("avrcp".into())
+        .spawn(move || {
+            let mut tl: u8 = 0;
+            let mut waiting: Option<PendingReply> = None;
+            let mut notify_tl: Option<u8> = None;
+            let send_avctp =
+                |tl: u8, response: bool, avc: &[u8]| -> Result<()> { l2.send(cid, &avctp_packet(tl, response, avc)) };
+            let register = |tl: &mut u8, notify_tl: &mut Option<u8>| {
+                *tl = (*tl + 1) & 0x0F;
+                if send_avctp(*tl, false, &VOLUME_CHANGED_REGISTRATION).is_ok() {
+                    *notify_tl = Some(*tl);
+                }
+            };
+            register(&mut tl, &mut notify_tl); // initial subscription
+            while let Ok(m) = mux_rx.recv() {
+                if waiting.as_ref().is_some_and(|(_, _, t0)| t0.elapsed() > Duration::from_secs(6)) {
+                    waiting = None;
+                }
+                match m {
+                    AvrMsg::Pkt(p) => {
+                        if p.closed {
+                            break;
                         }
-                        continue;
-                    }
-                    let status = avc.first().copied().unwrap_or(0);
-                    // VOLUME_CHANGED notification (interim 0x0f, then changed 0x0d):
-                    // [response][subunit][0x00][00 19 58][0x31][packet type][length(2)][event 0x0d][volume]
-                    if notify_tl == Some(t) && avc.len() >= 12 && avc[2] == 0x00 && avc[3..6] == [0x00, 0x19, 0x58]
-                        && avc[6] == 0x31 && avc[10] == 0x0d {
-                        bus.publish(Event::AudioVolumeChanged { id: device, volume: avc[11] & 0x7F });
-                        if status != 0x0F {
-                            // final (volume changed) -> re-register
-                            notify_tl = None;
-                            register(&mut tl, &mut notify_tl);
-                        } // interim: keep waiting for the final on this label
-                        continue;
-                    }
-                    if let Some((wtl, reply, t0)) = waiting.take() {
-                        if t == wtl {
-                            let _ = reply.send(if matches!(status, 0x09 | 0x0C | 0x0F) { Ok(avc.to_vec()) }
-                                else { Err(Error::ConnectionFailed(format!("avrcp rejected: status 0x{status:02x}"))) });
+                        let d = &p.data;
+                        if d.len() < 4 {
                             continue;
                         }
-                        waiting = Some((wtl, reply, t0));
+                        // AVCTP: [label << 4 | packet type << 2 | C/R << 1 | IPID][PID hi][PID lo], then the AV/C frame
+                        let t = d[0] >> 4;
+                        let is_response = (d[0] >> 1) & 1 == 1;
+                        let avc = &d[3..];
+                        if !is_response {
+                            // a command from the device: [ctype][subunit][opcode][operands...]
+                            if avc.len() >= 5 && avc[2] == 0x7c {
+                                // PASS THROUGH: a button on the speaker (operation id | released << 7)
+                                let released = avc[3] & 0x80 != 0;
+                                if !released {
+                                    if let Some(name) = avrcp_op_name(avc[3] & 0x7f) {
+                                        bus.publish(Event::MediaCommand { id: device, command: name.to_string() });
+                                    }
+                                }
+                                let _ = send_avctp(t, true, &[0x09, avc[1], 0x7c, avc[3], avc[4]]);
+                            // ACCEPTED
+                            } else if avc.len() >= 3 {
+                                // anything else: NOT IMPLEMENTED (the same frame with response code 0x08)
+                                let mut r = avc.to_vec();
+                                r[0] = 0x08;
+                                let _ = send_avctp(t, true, &r);
+                            }
+                            continue;
+                        }
+                        let status = avc.first().copied().unwrap_or(0);
+                        // VOLUME_CHANGED notification (interim 0x0f, then changed 0x0d):
+                        // [response][subunit][0x00][00 19 58][0x31][packet type][length(2)][event 0x0d][volume]
+                        if notify_tl == Some(t)
+                            && avc.len() >= 12
+                            && avc[2] == 0x00
+                            && avc[3..6] == [0x00, 0x19, 0x58]
+                            && avc[6] == 0x31
+                            && avc[10] == 0x0d
+                        {
+                            bus.publish(Event::AudioVolumeChanged { id: device, volume: avc[11] & 0x7F });
+                            if status != 0x0F {
+                                // final (volume changed) -> re-register
+                                notify_tl = None;
+                                register(&mut tl, &mut notify_tl);
+                            } // interim: keep waiting for the final on this label
+                            continue;
+                        }
+                        if let Some((wtl, reply, t0)) = waiting.take() {
+                            if t == wtl {
+                                let _ = reply.send(if matches!(status, 0x09 | 0x0C | 0x0F) {
+                                    Ok(avc.to_vec())
+                                } else {
+                                    Err(Error::ConnectionFailed(format!("avrcp rejected: status 0x{status:02x}")))
+                                });
+                                continue;
+                            }
+                            waiting = Some((wtl, reply, t0));
+                        }
                     }
-                }
-                AvrMsg::Cmd(c) => {
-                    if waiting.is_some() {
-                        if let Some(r) = c.reply { let _ = r.send(Err(Error::InvalidState("avrcp busy".into()))); }
-                        continue;
-                    }
-                    loop { tl = (tl + 1) & 0x0F; if Some(tl) != notify_tl { break; } }
-                    if send_avctp(tl, false, &c.avc).is_ok() {
-                        if let Some(r) = c.reply { waiting = Some((tl, r, Instant::now())); }
-                    } else if let Some(r) = c.reply {
-                        let _ = r.send(Err(Error::TransportClosed));
+                    AvrMsg::Cmd(c) => {
+                        if waiting.is_some() {
+                            if let Some(r) = c.reply {
+                                let _ = r.send(Err(Error::InvalidState("avrcp busy".into())));
+                            }
+                            continue;
+                        }
+                        loop {
+                            tl = (tl + 1) & 0x0F;
+                            if Some(tl) != notify_tl {
+                                break;
+                            }
+                        }
+                        if send_avctp(tl, false, &c.avc).is_ok() {
+                            if let Some(r) = c.reply {
+                                waiting = Some((tl, r, Instant::now()));
+                            }
+                        } else if let Some(r) = c.reply {
+                            let _ = r.send(Err(Error::TransportClosed));
+                        }
                     }
                 }
             }
-        }
-    }).ok();
+        })
+        .ok();
     mux_tx
 }
 
 /// Map a friendly name to an AVRCP PASSTHROUGH opcode.
 pub fn avrcp_op(name: &str) -> Option<u8> {
     match name {
-        "play" => Some(0x44), "stop" => Some(0x45), "pause" => Some(0x46),
-        "next" => Some(0x4B), "prev" => Some(0x4C),
-        "volup" => Some(0x41), "voldown" => Some(0x42), "mute" => Some(0x43),
+        "play" => Some(0x44),
+        "stop" => Some(0x45),
+        "pause" => Some(0x46),
+        "next" => Some(0x4B),
+        "prev" => Some(0x4C),
+        "volup" => Some(0x41),
+        "voldown" => Some(0x42),
+        "mute" => Some(0x43),
         _ => None,
     }
 }
@@ -814,10 +1042,16 @@ pub fn avrcp_op(name: &str) -> Option<u8> {
 /// Inverse of `avrcp_op`: opcode -> friendly name (used for MediaCommand events).
 pub fn avrcp_op_name(op: u8) -> Option<&'static str> {
     match op {
-        0x44 => Some("play"), 0x45 => Some("stop"), 0x46 => Some("pause"),
-        0x4B => Some("next"), 0x4C => Some("prev"),
-        0x41 => Some("volup"), 0x42 => Some("voldown"), 0x43 => Some("mute"),
-        0x48 => Some("fastforward"), 0x49 => Some("rewind"),
+        0x44 => Some("play"),
+        0x45 => Some("stop"),
+        0x46 => Some("pause"),
+        0x4B => Some("next"),
+        0x4C => Some("prev"),
+        0x41 => Some("volup"),
+        0x42 => Some("voldown"),
+        0x43 => Some("mute"),
+        0x48 => Some("fastforward"),
+        0x49 => Some("rewind"),
         _ => None,
     }
 }
@@ -826,18 +1060,28 @@ pub fn avrcp_op_name(op: u8) -> Option<&'static str> {
 
 fn at_ok(rf: &RfcommClient, l2: &L2cap, extra: Option<&str>) {
     let mut r = Vec::new();
-    if let Some(e) = extra { r.extend_from_slice(format!("\r\n{e}\r\n").as_bytes()); }
+    if let Some(e) = extra {
+        r.extend_from_slice(format!("\r\n{e}\r\n").as_bytes());
+    }
     r.extend_from_slice(b"\r\nOK\r\n");
     let _ = rf.send(l2, &r);
 }
-fn at_err(rf: &RfcommClient, l2: &L2cap) { let _ = rf.send(l2, b"\r\nERROR\r\n"); }
+fn at_err(rf: &RfcommClient, l2: &L2cap) {
+    let _ = rf.send(l2, b"\r\nERROR\r\n");
+}
 
 fn handle_at(
-    rf: &RfcommClient, l2: &L2cap, bus: &Arc<EventBus>,
-    st: &Arc<Mutex<HashMap<DeviceId, AudioSession>>>, device: &DeviceId, line: &[u8],
+    rf: &RfcommClient,
+    l2: &L2cap,
+    bus: &Arc<EventBus>,
+    st: &Arc<Mutex<HashMap<DeviceId, AudioSession>>>,
+    device: &DeviceId,
+    line: &[u8],
 ) {
     let l = String::from_utf8_lossy(line).trim().to_string();
-    if l.is_empty() { return; }
+    if l.is_empty() {
+        return;
+    }
     if let Some(_hf_features) = l.strip_prefix("AT+BRSF=") {
         at_ok(rf, l2, Some(&format!("+BRSF: {AG_FEATURES}")));
     } else if l == "AT+CIND=?" {
@@ -846,23 +1090,29 @@ fn handle_at(
         at_ok(rf, l2, Some("+CIND: 1,0,0,0,5,0,5"));
     } else if l == "AT+CHLD=?" {
         at_ok(rf, l2, Some("+CHLD: (0,1,2,3)"));
-    } else if let Some(v) = l.strip_prefix("AT+VGS=") { // headset speaker volume (0-15)
+    } else if let Some(v) = l.strip_prefix("AT+VGS=") {
+        // headset speaker volume (0-15)
         match v.trim().parse::<u8>() {
             Ok(n) => {
                 let n = n.min(15);
                 if let Some(s) = st.lock().unwrap().get_mut(device) {
-                    if let Some(h) = s.hfp.as_mut() { h.volume = n; }
+                    if let Some(h) = s.hfp.as_mut() {
+                        h.volume = n;
+                    }
                 }
                 bus.publish(Event::AudioVolumeChanged { id: *device, volume: (n as u16 * 127 / 15) as u8 });
                 at_ok(rf, l2, None);
             }
             Err(_) => at_err(rf, l2),
         }
-    } else if let Some(v) = l.strip_prefix("AT+VGM=") { // headset mic volume (0-15)
+    } else if let Some(v) = l.strip_prefix("AT+VGM=") {
+        // headset mic volume (0-15)
         match v.trim().parse::<u8>() {
             Ok(n) => {
                 if let Some(s) = st.lock().unwrap().get_mut(device) {
-                    if let Some(h) = s.hfp.as_mut() { h.mic_volume = n.min(15); }
+                    if let Some(h) = s.hfp.as_mut() {
+                        h.mic_volume = n.min(15);
+                    }
                 }
                 at_ok(rf, l2, None);
             }
@@ -880,7 +1130,8 @@ fn handle_at(
         || l.starts_with("AT+CCWA=")
         || l.starts_with("AT+COPS=")
         || l == "AT+CNUM"
-        || l == "AT+CLCC" {
+        || l == "AT+CLCC"
+    {
         at_ok(rf, l2, None);
     } else {
         at_err(rf, l2);
@@ -923,7 +1174,10 @@ mod tests {
         assert_eq!(avctp_packet(1, true, &[]), vec![0x12, 0x11, 0x0e]);
         assert_eq!(passthrough_frame(0x44, false), vec![0x00, 0x48, 0x7c, 0x44, 0x00]);
         assert_eq!(passthrough_frame(0x44, true), vec![0x00, 0x48, 0x7c, 0xc4, 0x00]);
-        assert_eq!(set_absolute_volume_frame(200), vec![0x00, 0x48, 0x00, 0x00, 0x19, 0x58, 0x50, 0x00, 0x00, 0x01, 127]);
+        assert_eq!(
+            set_absolute_volume_frame(200),
+            vec![0x00, 0x48, 0x00, 0x00, 0x19, 0x58, 0x50, 0x00, 0x00, 0x01, 127]
+        );
         assert_eq!(VOLUME_CHANGED_REGISTRATION[..10], [0x03, 0x48, 0x00, 0x00, 0x19, 0x58, 0x31, 0x00, 0x00, 0x05]);
     }
 }

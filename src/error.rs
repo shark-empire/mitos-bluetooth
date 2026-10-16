@@ -26,7 +26,9 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Timeout(w) => write!(f, "timeout waiting for {w}"),
-            Error::Hci { opcode, status } => write!(f, "hci command 0x{opcode:04x} failed: {status} ({})", hci_status_text(*status)),
+            Error::Hci { opcode, status } => {
+                write!(f, "hci command 0x{opcode:04x} failed: {status} ({})", hci_status_text(*status))
+            }
             Error::NotFound(w) => write!(f, "not found: {w}"),
             Error::InvalidState(w) => write!(f, "invalid state: {w}"),
             Error::InvalidArgument(w) => write!(f, "invalid argument: {w}"),
@@ -45,10 +47,20 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<std::io::Error> for Error { fn from(e: std::io::Error) -> Self { Error::Io(e) } }
-impl From<serde_json::Error> for Error { fn from(e: serde_json::Error) -> Self { Error::Serialization(e.to_string()) } }
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Serialization(e.to_string())
+    }
+}
 impl From<std::sync::mpsc::RecvTimeoutError> for Error {
-    fn from(_: std::sync::mpsc::RecvTimeoutError) -> Self { Error::Timeout("channel") }
+    fn from(_: std::sync::mpsc::RecvTimeoutError) -> Self {
+        Error::Timeout("channel")
+    }
 }
 
 pub fn hci_status_text(s: u8) -> &'static str {

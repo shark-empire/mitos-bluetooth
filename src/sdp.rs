@@ -72,11 +72,14 @@ fn parse_de_depth(b: &[u8], i: &mut usize, depth: u32) -> Result<De> {
         }
     };
     let start = *i;
-    let end = start.checked_add(len).filter(|&e| e <= b.len()).ok_or_else(|| Error::Sdp("data element overruns the buffer".into()))?;
+    let end = start
+        .checked_add(len)
+        .filter(|&e| e <= b.len())
+        .ok_or_else(|| Error::Sdp("data element overruns the buffer".into()))?;
     let body = &b[start..end];
     let val = match ty {
         0 => De::U(0),
-        1 | 2 | 3 => {
+        1..=3 => {
             if body.len() > 16 {
                 return Err(Error::Sdp("integer wider than 128 bits".into()));
             }
@@ -325,8 +328,8 @@ mod tests {
     fn protocol_descriptor_list_yields_the_l2cap_psm() {
         // SEQ{ SEQ{ id 0x0004, SEQ{ SEQ{UUID 0x0100, uint16 0x0011}, SEQ{UUID 0x0011} } } }
         let raw = [
-            0x35, 0x14, 0x35, 0x12, 0x09, 0x00, 0x04, 0x35, 0x0d, 0x35, 0x06, 0x19, 0x01, 0x00, 0x09, 0x00, 0x11, 0x35, 0x03,
-            0x19, 0x00, 0x11,
+            0x35, 0x14, 0x35, 0x12, 0x09, 0x00, 0x04, 0x35, 0x0d, 0x35, 0x06, 0x19, 0x01, 0x00, 0x09, 0x00, 0x11, 0x35,
+            0x03, 0x19, 0x00, 0x11,
         ];
         let svc = parse_attribute_lists(&raw).unwrap();
         assert_eq!(svc.psm, Some(0x0011));
@@ -337,8 +340,8 @@ mod tests {
     fn rfcomm_channel_and_name_are_found() {
         // protocol list: L2CAP, RFCOMM channel 7; service name "AG"
         let raw = [
-            0x35, 0x1a, 0x35, 0x18, 0x09, 0x00, 0x04, 0x35, 0x0c, 0x35, 0x03, 0x19, 0x01, 0x00, 0x35, 0x05, 0x19, 0x00, 0x03,
-            0x08, 0x07, 0x09, 0x01, 0x00, 0x25, 0x02, 0x41, 0x47,
+            0x35, 0x1a, 0x35, 0x18, 0x09, 0x00, 0x04, 0x35, 0x0c, 0x35, 0x03, 0x19, 0x01, 0x00, 0x35, 0x05, 0x19, 0x00,
+            0x03, 0x08, 0x07, 0x09, 0x01, 0x00, 0x25, 0x02, 0x41, 0x47,
         ];
         let svc = parse_attribute_lists(&raw).unwrap();
         assert_eq!(svc.rfcomm_channel, Some(7));
@@ -351,7 +354,7 @@ mod tests {
         assert!(parse_attribute_lists(&[0x35, 0xff, 0x09]).is_err()); // length runs past the end
         assert!(parse_attribute_lists(&[0x36, 0xff, 0xff, 0x00]).is_err()); // 2-byte length runs past the end
         assert!(parse_attribute_lists(&[0x3f]).is_err()); // 4-byte length missing
-        // 21 properly sized, nested sequences: deeper than we are willing to follow
+                                                          // 21 properly sized, nested sequences: deeper than we are willing to follow
         let mut nested = vec![0x35, 0x00];
         for _ in 0..20 {
             let mut wrapped = vec![0x35, nested.len() as u8];

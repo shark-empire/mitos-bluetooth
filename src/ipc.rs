@@ -54,7 +54,10 @@ impl IpcServer {
 fn handle_client(stream: UnixStream, mgr: Arc<BluetoothManager>, bus: Arc<EventBus>) {
     let out = match stream.try_clone() {
         Ok(s) => Arc::new(Mutex::new(s)),
-        Err(e) => { eprintln!("[ipc] clone stream: {e}"); return; }
+        Err(e) => {
+            eprintln!("[ipc] clone stream: {e}");
+            return;
+        }
     };
     let privileged = peer_is_privileged(&stream);
     let alive = Arc::new(AtomicBool::new(true));
@@ -72,7 +75,10 @@ fn handle_client(stream: UnixStream, mgr: Arc<BluetoothManager>, bus: Arc<EventB
         }
         let req: Value = match serde_json::from_str(line.trim()) {
             Ok(v) => v,
-            Err(e) => { write_line(&out, &json!({"id": null, "ok": false, "error": format!("bad request: {e}")})); continue; }
+            Err(e) => {
+                write_line(&out, &json!({"id": null, "ok": false, "error": format!("bad request: {e}")}));
+                continue;
+            }
         };
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
@@ -109,8 +115,13 @@ fn peer_is_privileged(stream: &UnixStream) -> bool {
     let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
     let mut len = std::mem::size_of::<libc::ucred>() as u32;
     let ok = unsafe {
-        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
-                         &mut cred as *mut _ as *mut libc::c_void, &mut len) == 0
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        ) == 0
     };
     ok && cred.uid == unsafe { libc::geteuid() }
 }
@@ -130,10 +141,26 @@ fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value, privileged: bool) -
         "get_state" => serde_json::to_value(mgr.state())?,
         "get_adapters" => serde_json::to_value(mgr.adapters())?,
         "get_bonds" => serde_json::to_value(mgr.bonds_list())?,
-        "power_on" => { let i = p_index(p)?; serde_json::to_value(mgr.power_on(i)?)? }
-        "power_off" => { let i = p_index(p)?; mgr.power_off(i)?; json!(true) }
-        "set_discoverable" => { let i = p_index(p)?; mgr.set_discoverable(i, p_bool(p, "on"))?; json!(true) }
-        "set_name" => { let i = p_index(p)?; let n = p_str(p, "name")?; mgr.set_name(i, &n)?; json!(true) }
+        "power_on" => {
+            let i = p_index(p)?;
+            serde_json::to_value(mgr.power_on(i)?)?
+        }
+        "power_off" => {
+            let i = p_index(p)?;
+            mgr.power_off(i)?;
+            json!(true)
+        }
+        "set_discoverable" => {
+            let i = p_index(p)?;
+            mgr.set_discoverable(i, p_bool(p, "on"))?;
+            json!(true)
+        }
+        "set_name" => {
+            let i = p_index(p)?;
+            let n = p_str(p, "name")?;
+            mgr.set_name(i, &n)?;
+            json!(true)
+        }
         "start_discovery" => {
             let i = p_index(p)?;
             let le = p.get("le").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -142,103 +169,222 @@ fn dispatch(mgr: &BluetoothManager, method: &str, p: &Value, privileged: bool) -
             mgr.start_discovery(i, bredr, le, t)?;
             json!(true)
         }
-        "stop_discovery" => { let i = p_index(p)?; mgr.stop_discovery(i)?; json!(true) }
-        "get_devices" => { let i = p_index(p)?; serde_json::to_value(mgr.devices(i)?)? }
+        "stop_discovery" => {
+            let i = p_index(p)?;
+            mgr.stop_discovery(i)?;
+            json!(true)
+        }
+        "get_devices" => {
+            let i = p_index(p)?;
+            serde_json::to_value(mgr.devices(i)?)?
+        }
         "get_device" => {
             let i = p_index(p)?;
             let id = resolve_device(mgr, i, p)?;
-            match mgr.get_device(i, &id)? { Some(d) => serde_json::to_value(d)?, None => Value::Null }
+            match mgr.get_device(i, &id)? {
+                Some(d) => serde_json::to_value(d)?,
+                None => Value::Null,
+            }
         }
-        "pair" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.pair(i, &id)?; json!(true) }
-        "pairing_confirm" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.pairing_confirm(i, &id, p_bool(p, "accept"))?; json!(true) }
-        "provide_pin" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; let pin = p_str(p, "pin")?; mgr.provide_pin(i, &id, &pin)?; json!(true) }
+        "pair" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.pair(i, &id)?;
+            json!(true)
+        }
+        "pairing_confirm" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.pairing_confirm(i, &id, p_bool(p, "accept"))?;
+            json!(true)
+        }
+        "provide_pin" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            let pin = p_str(p, "pin")?;
+            mgr.provide_pin(i, &id, &pin)?;
+            json!(true)
+        }
         "provide_passkey" => {
             let i = p_index(p)?;
             let id = resolve_device(mgr, i, p)?;
-            let k = p.get("passkey").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("passkey required".into()))? as u32;
-            mgr.provide_passkey(i, &id, k)?; json!(true)
+            let k = p
+                .get("passkey")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::InvalidArgument("passkey required".into()))? as u32;
+            mgr.provide_passkey(i, &id, k)?;
+            json!(true)
         }
-        "cancel_pairing" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.cancel_pairing(i, &id)?; json!(true) }
+        "cancel_pairing" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.cancel_pairing(i, &id)?;
+            json!(true)
+        }
         "connect" => {
             let i = p_index(p)?;
             let id = resolve_device(mgr, i, p)?;
-            let kind = ProfileKind::from_label(p.get("profile").and_then(|v| v.as_str()).unwrap_or("hid"))
-                .ok_or_else(|| Error::InvalidArgument("profile must be one of: hid, a2dp, avrcp, hfp, hsp, gatt".into()))?;
+            let kind = ProfileKind::from_label(p.get("profile").and_then(|v| v.as_str()).unwrap_or("hid")).ok_or_else(
+                || Error::InvalidArgument("profile must be one of: hid, a2dp, avrcp, hfp, hsp, gatt".into()),
+            )?;
             mgr.connect(i, &id, kind)?;
             json!(true)
         }
-        "disconnect" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.disconnect(i, &id)?; json!(true) }
-        "reconnect" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.reconnect(i, &id)?; json!(true) }
+        "disconnect" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.disconnect(i, &id)?;
+            json!(true)
+        }
+        "reconnect" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.reconnect(i, &id)?;
+            json!(true)
+        }
         "set_keyboard_leds" => {
             let i = p_index(p)?;
             let id = resolve_device(mgr, i, p)?;
-            let leds = p.get("leds").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("leds (bitmask) required".into()))?;
+            let leds = p
+                .get("leds")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::InvalidArgument("leds (bitmask) required".into()))?;
             mgr.set_keyboard_leds(i, &id, (leds & 0xff) as u8)?;
             json!(true)
         }
-        "get_connections" => { let i = p_index(p)?; serde_json::to_value(mgr.connections(i)?)? }
-        "set_trusted" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.set_trusted(&id, p_bool(p, "on"))?; json!(true) }
-        "remove_device" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.remove_device(i, &id)?; json!(true) }
-                "gatt_services" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; serde_json::to_value(mgr.gatt_services(i, &id)?)? }
+        "get_connections" => {
+            let i = p_index(p)?;
+            serde_json::to_value(mgr.connections(i)?)?
+        }
+        "set_trusted" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.set_trusted(&id, p_bool(p, "on"))?;
+            json!(true)
+        }
+        "remove_device" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.remove_device(i, &id)?;
+            json!(true)
+        }
+        "gatt_services" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            serde_json::to_value(mgr.gatt_services(i, &id)?)?
+        }
         "gatt_characteristics" => {
-            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
-            let svc = p.get("service").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("service (start handle) required".into()))? as u16;
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            let svc = p
+                .get("service")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::InvalidArgument("service (start handle) required".into()))?
+                as u16;
             serde_json::to_value(mgr.gatt_characteristics(i, &id, svc)?)?
         }
         "gatt_read" => {
-            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
-            let attr = p.get("attribute").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            let attr = p
+                .get("attribute")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
             serde_json::to_value(crate::device::to_hex(&mgr.gatt_read(i, &id, attr)?))?
         }
         "gatt_write" => {
-            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
-            let attr = p.get("attribute").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            let attr = p
+                .get("attribute")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
             let data = crate::device::from_hex(&p_str(p, "data")?)?;
             mgr.gatt_write(i, &id, attr, &data, p_bool(p, "response"))?;
             json!(true)
         }
         "gatt_subscribe" => {
-            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
-            let attr = p.get("attribute").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            let attr = p
+                .get("attribute")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::InvalidArgument("attribute required".into()))? as u16;
             let kind = p.get("kind").and_then(|v| v.as_u64()).unwrap_or(1) as u16; // 1 notify, 2 indicate
             mgr.gatt_subscribe(i, &id, attr, kind)?;
             json!(true)
         }
-                "a2dp_start" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.a2dp_start(i, &id)?; json!(true) }
-        "a2dp_suspend" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.a2dp_suspend(i, &id)?; json!(true) }
-        "a2dp_state" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; serde_json::to_value(mgr.a2dp_state(i, &id)?)? }
+        "a2dp_start" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.a2dp_start(i, &id)?;
+            json!(true)
+        }
+        "a2dp_suspend" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.a2dp_suspend(i, &id)?;
+            json!(true)
+        }
+        "a2dp_state" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            serde_json::to_value(mgr.a2dp_state(i, &id)?)?
+        }
         "a2dp_send_sbc" => {
-            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
             let data = crate::device::from_hex(&p_str(p, "data")?)?;
             let nframes = p.get("frames").and_then(|v| v.as_u64()).unwrap_or(1) as u32; // pass real count when batching
             mgr.a2dp_send_sbc(i, &id, &data, nframes)?;
             json!(true)
         }
         "avrcp_command" => {
-            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
             let op = p_str(p, "op")?; // play | pause | stop | next | prev | volup | voldown | mute
             mgr.avrcp_command(i, &id, &op)?;
             json!(true)
         }
         "set_volume" => {
-            let i = p_index(p)?; let id = resolve_device(mgr, i, p)?;
-            let v = p.get("volume").and_then(|v| v.as_u64()).ok_or_else(|| Error::InvalidArgument("volume required".into()))? as u8;
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            let v = p
+                .get("volume")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::InvalidArgument("volume required".into()))? as u8;
             mgr.set_volume(i, &id, v)?;
             json!(true)
         }
-        "hfp_connect_sco" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.hfp_connect_sco(i, &id)?; json!(true) }
-        "hfp_disconnect_sco" => { let i = p_index(p)?; let id = resolve_device(mgr, i, p)?; mgr.hfp_disconnect_sco(i, &id)?; json!(true) }
+        "hfp_connect_sco" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.hfp_connect_sco(i, &id)?;
+            json!(true)
+        }
+        "hfp_disconnect_sco" => {
+            let i = p_index(p)?;
+            let id = resolve_device(mgr, i, p)?;
+            mgr.hfp_disconnect_sco(i, &id)?;
+            json!(true)
+        }
         other => return Err(Error::NotFound(format!("unknown method '{other}'"))),
     })
 }
 
 fn p_index(p: &Value) -> Result<u32> {
-    p.get("index").and_then(|v| v.as_u64()).map(|v| v as u32)
+    p.get("index")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
         .ok_or_else(|| Error::InvalidArgument("index required".into()))
 }
-fn p_bool(p: &Value, k: &str) -> bool { p.get(k).and_then(|v| v.as_bool()).unwrap_or(false) }
+fn p_bool(p: &Value, k: &str) -> bool {
+    p.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
+}
 fn p_str(p: &Value, k: &str) -> Result<String> {
-    p.get(k).and_then(|v| v.as_str()).map(|s| s.to_string())
+    p.get(k)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
         .ok_or_else(|| Error::InvalidArgument(format!("{k} required")))
 }
 

@@ -113,7 +113,12 @@ fn voice_link_requests_without_a_hands_free_session_are_refused() {
     let reject = wait_command(&shared, op::REJECT_SYNCHRONOUS_CONNECTION).expect("eSCO request was not answered");
     assert_eq!(reject[4..10], addr);
     // and it must not have been mistaken for an ACL request
-    assert!(shared.lock().unwrap().sent_commands().iter().all(|c| c[1..3] != op::ACCEPT_CONNECTION_REQUEST.to_le_bytes()));
+    assert!(shared
+        .lock()
+        .unwrap()
+        .sent_commands()
+        .iter()
+        .all(|c| c[1..3] != op::ACCEPT_CONNECTION_REQUEST.to_le_bytes()));
 }
 
 #[test]
@@ -124,7 +129,12 @@ fn trusted_only_refuses_strangers_until_the_adapter_is_discoverable() {
     shared.lock().unwrap().inject_event(connection_request(stranger, 0x01));
     let reject = wait_command(&shared, op::REJECT_CONNECTION_REQUEST).expect("stranger was not refused");
     assert_eq!(reject[4..10], stranger);
-    assert!(shared.lock().unwrap().sent_commands().iter().all(|c| c[1..3] != op::ACCEPT_CONNECTION_REQUEST.to_le_bytes()));
+    assert!(shared
+        .lock()
+        .unwrap()
+        .sent_commands()
+        .iter()
+        .all(|c| c[1..3] != op::ACCEPT_CONNECTION_REQUEST.to_le_bytes()));
 
     // while discoverable, a new device is exactly who we are waiting for
     mgr.set_discoverable(0, true).unwrap();

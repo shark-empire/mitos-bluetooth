@@ -159,12 +159,8 @@ impl ConnectionManager {
             return Ok(h);
         }
         self.devices.lock().unwrap().entry(*id).or_insert_with(|| Device::new(*id)).state = DeviceState::Connecting;
-        self.conns
-            .lock()
-            .unwrap()
-            .entry(*id)
-            .and_modify(|i| i.state = ConnectionState::Connecting)
-            .or_insert(ConnInfo {
+        self.conns.lock().unwrap().entry(*id).and_modify(|i| i.state = ConnectionState::Connecting).or_insert(
+            ConnInfo {
                 device: *id,
                 handle: 0,
                 le: id.address_type != AddressType::Bredr,
@@ -172,7 +168,8 @@ impl ConnectionManager {
                 encrypted: false,
                 profiles: Vec::new(),
                 since: now_ts(),
-            });
+            },
+        );
         match self.try_connect(id, timeout) {
             Ok(h) => Ok(h),
             Err(e) => {
@@ -455,7 +452,12 @@ impl ConnectionManager {
 
     fn on_connection_complete(&self, ev: &HciEvent, le: bool) {
         let (status, handle, addr, addr_type) = if le {
-            (ev.u8(1), ev.u16(2), ev.addr(6), if ev.u8(5) & 1 == 1 { AddressType::LeRandom } else { AddressType::LePublic })
+            (
+                ev.u8(1),
+                ev.u16(2),
+                ev.addr(6),
+                if ev.u8(5) & 1 == 1 { AddressType::LeRandom } else { AddressType::LePublic },
+            )
         } else {
             (ev.u8(0), ev.u16(1), ev.addr(3), AddressType::Bredr)
         };

@@ -78,9 +78,8 @@ impl Storage {
     }
 
     fn save<T: Serialize + ?Sized>(&self, name: &str, value: &T) {
-        let result = serde_json::to_string_pretty(value)
-            .map_err(Error::from)
-            .and_then(|text| self.write_atomic(name, &text));
+        let result =
+            serde_json::to_string_pretty(value).map_err(Error::from).and_then(|text| self.write_atomic(name, &text));
         if let Err(e) = result {
             eprintln!("[storage] could not save {name}: {e}");
         }
@@ -90,12 +89,7 @@ impl Storage {
         let tmp = self.dir.join(format!("{name}.tmp"));
         let dest = self.dir.join(name);
         {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
+            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
             f.write_all(contents.as_bytes())?;
             f.sync_all()?;
         }

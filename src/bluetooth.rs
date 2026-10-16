@@ -7,8 +7,8 @@ use crate::discovery::DiscoveryManager;
 use crate::error::{Error, Result};
 use crate::events::{Event, EventBus};
 use crate::gatt::GattManager;
-use crate::hid::HidHost;
 use crate::hci::{ev, list_linux_adapters, HciClient, HciEvent, SerialH4};
+use crate::hid::HidHost;
 use crate::l2cap::L2cap;
 use crate::pairing::PairingManager;
 use crate::profile::{ProfileKind, ProfileManager};
@@ -48,15 +48,26 @@ impl AdapterRuntime {
     }
     /// Open an adapter with an explicit transport — used by tests, serial, and a
     /// future mitos-kernel driver (implement `HciTransport`, pass it here).
-    pub fn open_with(index: u32, transport: Box<dyn crate::hci::HciTransport>,
-                     cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
+    pub fn open_with(
+        index: u32,
+        transport: Box<dyn crate::hci::HciTransport>,
+        cfg: &Config,
+        bus: Arc<EventBus>,
+        bonds: Arc<BondStore>,
+    ) -> Result<Arc<Self>> {
         let hci = Arc::new(crate::hci::HciClient::open(index, transport)?);
         let adapter = BluetoothAdapter { hci: hci.clone() };
         let info = adapter.init(&cfg.name, cfg.discoverable)?;
         Ok(Self::build(index, hci, info, cfg, bus, bonds))
     }
 
-    pub fn open_serial(index: u32, path: &str, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Result<Arc<Self>> {
+    pub fn open_serial(
+        index: u32,
+        path: &str,
+        cfg: &Config,
+        bus: Arc<EventBus>,
+        bonds: Arc<BondStore>,
+    ) -> Result<Arc<Self>> {
         let tr = SerialH4::open(path)?;
         let hci = Arc::new(HciClient::open(index, Box::new(tr))?);
         let adapter = BluetoothAdapter { hci: hci.clone() };
@@ -64,7 +75,14 @@ impl AdapterRuntime {
         Ok(Self::build(index, hci, info, cfg, bus, bonds))
     }
 
-    fn build(index: u32, hci: Arc<HciClient>, info: AdapterInfo, cfg: &Config, bus: Arc<EventBus>, bonds: Arc<BondStore>) -> Arc<Self> {
+    fn build(
+        index: u32,
+        hci: Arc<HciClient>,
+        info: AdapterInfo,
+        cfg: &Config,
+        bus: Arc<EventBus>,
+        bonds: Arc<BondStore>,
+    ) -> Arc<Self> {
         let l2 = L2cap::new(hci.clone());
         let devices: Arc<DeviceTable> = Arc::new(Mutex::new(HashMap::new()));
         let smp = Smp::new(l2.clone(), hci.clone(), bus.clone(), bonds.clone(), info.address);
@@ -85,7 +103,14 @@ impl AdapterRuntime {
             },
             cfg.trusted_only_connect && !info.discoverable,
         );
-        let pairing = PairingManager::new(hci.clone(), devices.clone(), bus.clone(), bonds.clone(), cfg.auto_pin, cfg.default_pin.clone());
+        let pairing = PairingManager::new(
+            hci.clone(),
+            devices.clone(),
+            bus.clone(),
+            bonds.clone(),
+            cfg.auto_pin,
+            cfg.default_pin.clone(),
+        );
         let discovery = DiscoveryManager::new(hci.clone(), devices.clone(), bus.clone(), index);
         // seed the device table from the bond database so the GUI sees paired devices after boot
         {
@@ -102,7 +127,20 @@ impl AdapterRuntime {
             }
         }
         let rt = Arc::new(AdapterRuntime {
-            index, hci, l2, smp, gatt, hid, audio, profiles, devices, bus, bonds, discovery, pairing, connections,
+            index,
+            hci,
+            l2,
+            smp,
+            gatt,
+            hid,
+            audio,
+            profiles,
+            devices,
+            bus,
+            bonds,
+            discovery,
+            pairing,
+            connections,
             info: Mutex::new(info),
             trusted_only: cfg.trusted_only_connect,
         });
@@ -111,16 +149,21 @@ impl AdapterRuntime {
         // delivery would deadlock (manager handlers issue HCI commands).
         // The thread holds only a Weak reference, so dropping the runtime releases the controller.
         let (tx, rx) = mpsc::channel::<HciEvent>();
-        rt.hci.set_event_handler(Box::new(move |event| { let _ = tx.send(event); }));
+        rt.hci.set_event_handler(Box::new(move |event| {
+            let _ = tx.send(event);
+        }));
         let weak = Arc::downgrade(&rt);
-        std::thread::Builder::new().name(format!("hci{index}-dispatch")).spawn(move || {
-            while let Ok(event) = rx.recv() {
-                match weak.upgrade() {
-                    Some(rt) => rt.dispatch(&event),
-                    None => break,
+        std::thread::Builder::new()
+            .name(format!("hci{index}-dispatch"))
+            .spawn(move || {
+                while let Ok(event) = rx.recv() {
+                    match weak.upgrade() {
+                        Some(rt) => rt.dispatch(&event),
+                        None => break,
+                    }
                 }
-            }
-        }).ok();
+            })
+            .ok();
         rt
     }
 
@@ -159,8 +202,12 @@ impl AdapterRuntime {
         i.discoverable = on;
         let snapshot = i.clone();
         drop(i);
-        self.bus.publish(Event::AdapterStateChanged { index: self.index, powered: true,
-            discoverable: snapshot.discoverable, connectable: snapshot.connectable });
+        self.bus.publish(Event::AdapterStateChanged {
+            index: self.index,
+            powered: true,
+            discoverable: snapshot.discoverable,
+            connectable: snapshot.connectable,
+        });
         Ok(())
     }
 
@@ -187,13 +234,21 @@ impl BluetoothManager {
         let store = Arc::new(Storage::new(data_dir)?);
         let cfg = store.load_config();
         let bonds = Arc::new(BondStore::new(store.clone()));
-        Ok(Arc::new(BluetoothManager { bus: Arc::new(EventBus::new()), store, bonds, cfg: Mutex::new(cfg),
-                                       adapters: Mutex::new(HashMap::new()), state: Mutex::new(BluetoothState::Off),
-                                       pair_timeout: Duration::from_secs(120) }))
+        Ok(Arc::new(BluetoothManager {
+            bus: Arc::new(EventBus::new()),
+            store,
+            bonds,
+            cfg: Mutex::new(cfg),
+            adapters: Mutex::new(HashMap::new()),
+            state: Mutex::new(BluetoothState::Off),
+            pair_timeout: Duration::from_secs(120),
+        }))
     }
     /// Bring an adapter up with an injected transport (tests / custom kernels).
     pub fn power_on_with(&self, index: u32, transport: Box<dyn crate::hci::HciTransport>) -> Result<AdapterInfo> {
-        if let Some(rt) = self.adapters.lock().unwrap().get(&index) { return Ok(rt.info.lock().unwrap().clone()); }
+        if let Some(rt) = self.adapters.lock().unwrap().get(&index) {
+            return Ok(rt.info.lock().unwrap().clone());
+        }
         let cfg = self.cfg.lock().unwrap().clone();
         let rt = AdapterRuntime::open_with(index, transport, &cfg, self.bus.clone(), self.bonds.clone())?;
         let info = rt.info.lock().unwrap().clone();
@@ -206,24 +261,33 @@ impl BluetoothManager {
         self.bus.publish(Event::AdapterAdded { index, address: address.to_string() });
         Ok(info)
     }
-    
 
     fn publish_state(&self) {
         let s = self.state.lock().unwrap().clone();
         self.bus.publish(Event::BluetoothStateChanged { state: s });
     }
-    pub fn state(&self) -> BluetoothState { self.state.lock().unwrap().clone() }
+    pub fn state(&self) -> BluetoothState {
+        self.state.lock().unwrap().clone()
+    }
     pub fn adapters(&self) -> Vec<AdapterInfo> {
         self.adapters.lock().unwrap().values().map(|r| r.info.lock().unwrap().clone()).collect()
     }
     pub fn runtime(&self, index: u32) -> Result<Arc<AdapterRuntime>> {
-        self.adapters.lock().unwrap().get(&index).cloned()
+        self.adapters
+            .lock()
+            .unwrap()
+            .get(&index)
+            .cloned()
             .ok_or_else(|| Error::NotFound(format!("adapter hci{index} (is Bluetooth powered on?)")))
     }
 
-        // ---- audio ----
-    pub fn a2dp_start(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.a2dp_start(id) }
-    pub fn a2dp_suspend(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.a2dp_suspend(id) }
+    // ---- audio ----
+    pub fn a2dp_start(&self, index: u32, id: &DeviceId) -> Result<()> {
+        self.runtime(index)?.audio.a2dp_start(id)
+    }
+    pub fn a2dp_suspend(&self, index: u32, id: &DeviceId) -> Result<()> {
+        self.runtime(index)?.audio.a2dp_suspend(id)
+    }
     pub fn a2dp_send_sbc(&self, index: u32, id: &DeviceId, frames: &[u8], nframes: u32) -> Result<()> {
         self.runtime(index)?.audio.a2dp_send_sbc(id, frames, nframes)
     }
@@ -237,8 +301,12 @@ impl BluetoothManager {
     pub fn set_volume(&self, index: u32, id: &DeviceId, volume: u8) -> Result<()> {
         self.runtime(index)?.audio.set_absolute_volume(id, volume)
     }
-    pub fn hfp_connect_sco(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.hfp_connect_sco(id) }
-    pub fn hfp_disconnect_sco(&self, index: u32, id: &DeviceId) -> Result<()> { self.runtime(index)?.audio.hfp_disconnect_sco(id) }
+    pub fn hfp_connect_sco(&self, index: u32, id: &DeviceId) -> Result<()> {
+        self.runtime(index)?.audio.hfp_connect_sco(id)
+    }
+    pub fn hfp_disconnect_sco(&self, index: u32, id: &DeviceId) -> Result<()> {
+        self.runtime(index)?.audio.hfp_disconnect_sco(id)
+    }
 
     // ---- GATT (LE only for now) ----
     fn conn_handle(&self, index: u32, id: &DeviceId) -> Result<u16> {
@@ -252,10 +320,19 @@ impl BluetoothManager {
         let h = self.conn_handle(index, id)?;
         self.runtime(index)?.gatt.discover_services(h)
     }
-    pub fn gatt_characteristics(&self, index: u32, id: &DeviceId, service_start: u16) -> Result<Vec<crate::gatt::GattCharacteristic>> {
+    pub fn gatt_characteristics(
+        &self,
+        index: u32,
+        id: &DeviceId,
+        service_start: u16,
+    ) -> Result<Vec<crate::gatt::GattCharacteristic>> {
         let rt = self.runtime(index)?;
         let h = self.conn_handle(index, id)?;
-        let svc = rt.gatt.discover_services(h)?.into_iter().find(|s| s.start == service_start)
+        let svc = rt
+            .gatt
+            .discover_services(h)?
+            .into_iter()
+            .find(|s| s.start == service_start)
             .ok_or_else(|| Error::NotFound("service".into()))?;
         rt.gatt.discover_characteristics(h, &svc)
     }
@@ -293,11 +370,17 @@ impl BluetoothManager {
         Ok(())
     }
 
-    pub fn power_on(&self, index: u32) -> Result<AdapterInfo> { self.open_adapter(index, None) }
-    pub fn power_on_serial(&self, index: u32, path: &str) -> Result<AdapterInfo> { self.open_adapter(index, Some(path)) }
+    pub fn power_on(&self, index: u32) -> Result<AdapterInfo> {
+        self.open_adapter(index, None)
+    }
+    pub fn power_on_serial(&self, index: u32, path: &str) -> Result<AdapterInfo> {
+        self.open_adapter(index, Some(path))
+    }
 
     fn open_adapter(&self, index: u32, serial: Option<&str>) -> Result<AdapterInfo> {
-        if let Some(rt) = self.adapters.lock().unwrap().get(&index) { return Ok(rt.info.lock().unwrap().clone()); }
+        if let Some(rt) = self.adapters.lock().unwrap().get(&index) {
+            return Ok(rt.info.lock().unwrap().clone());
+        }
         let cfg = self.cfg.lock().unwrap().clone();
         let rt = match serial {
             Some(path) => AdapterRuntime::open_serial(index, path, &cfg, self.bus.clone(), self.bonds.clone())?,
@@ -330,7 +413,9 @@ impl BluetoothManager {
     pub fn start_discovery(&self, index: u32, bredr: bool, le: bool, timeout_secs: u64) -> Result<()> {
         self.runtime(index)?.discovery.start(bredr, le, timeout_secs)
     }
-    pub fn stop_discovery(&self, index: u32) -> Result<()> { self.runtime(index)?.discovery.stop() }
+    pub fn stop_discovery(&self, index: u32) -> Result<()> {
+        self.runtime(index)?.discovery.stop()
+    }
     pub fn devices(&self, index: u32) -> Result<Vec<Device>> {
         let mut v: Vec<Device> = self.runtime(index)?.devices.lock().unwrap().values().cloned().collect();
         v.sort_by_key(|d| d.id);
@@ -417,8 +502,11 @@ impl BluetoothManager {
     }
     pub fn provide_passkey(&self, index: u32, id: &DeviceId, passkey: u32) -> Result<()> {
         let rt = self.runtime(index)?;
-        if id.address_type == AddressType::Bredr { rt.pairing.provide_passkey(id, passkey) }
-        else { rt.smp.provide_passkey(id, passkey) }
+        if id.address_type == AddressType::Bredr {
+            rt.pairing.provide_passkey(id, passkey)
+        } else {
+            rt.smp.provide_passkey(id, passkey)
+        }
     }
     pub fn cancel_pairing(&self, index: u32, id: &DeviceId) -> Result<()> {
         let rt = self.runtime(index)?;
@@ -448,21 +536,35 @@ impl BluetoothManager {
     // ---- adapter settings (persisted) ----
     pub fn set_discoverable(&self, index: u32, on: bool) -> Result<()> {
         self.runtime(index)?.set_discoverable(on)?;
-        let cfg = { let mut c = self.cfg.lock().unwrap(); c.discoverable = on; c.clone() };
+        let cfg = {
+            let mut c = self.cfg.lock().unwrap();
+            c.discoverable = on;
+            c.clone()
+        };
         self.store.save_config(&cfg);
         Ok(())
     }
     pub fn set_name(&self, index: u32, name: &str) -> Result<()> {
         self.runtime(index)?.set_name(name)?;
-        let cfg = { let mut c = self.cfg.lock().unwrap(); c.name = name.to_string(); c.clone() };
+        let cfg = {
+            let mut c = self.cfg.lock().unwrap();
+            c.name = name.to_string();
+            c.clone()
+        };
         self.store.save_config(&cfg);
         Ok(())
     }
 
     // ---- bonds ----
-    pub fn bonds_list(&self) -> Vec<Bond> { self.bonds.list() }
+    pub fn bonds_list(&self) -> Vec<Bond> {
+        self.bonds.list()
+    }
     pub fn set_trusted(&self, id: &DeviceId, on: bool) -> Result<()> {
-        if self.bonds.set_trusted(id, on) { Ok(()) } else { Err(Error::NotFound("no bond for device".into())) }
+        if self.bonds.set_trusted(id, on) {
+            Ok(())
+        } else {
+            Err(Error::NotFound("no bond for device".into()))
+        }
     }
     pub fn remove_device(&self, index: u32, id: &DeviceId) -> Result<()> {
         let rt = self.runtime(index)?;

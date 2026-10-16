@@ -40,7 +40,14 @@ fn bredr(addr: crate::device::Address) -> DeviceId {
 }
 
 impl PairingManager {
-    pub fn new(hci: Arc<HciClient>, devices: Arc<DeviceTable>, bus: Arc<EventBus>, bonds: Arc<BondStore>, auto_pin: bool, default_pin: String) -> Self {
+    pub fn new(
+        hci: Arc<HciClient>,
+        devices: Arc<DeviceTable>,
+        bus: Arc<EventBus>,
+        bonds: Arc<BondStore>,
+        auto_pin: bool,
+        default_pin: String,
+    ) -> Self {
         let pending: Arc<Mutex<HashMap<DeviceId, PendingPairing>>> = Arc::new(Mutex::new(HashMap::new()));
         // the janitor only watches a Weak reference, so it ends together with the manager
         let weak = Arc::downgrade(&pending);
@@ -52,15 +59,22 @@ impl PairingManager {
                 let Some(pending) = weak.upgrade() else { break };
                 let expired: Vec<DeviceId> = {
                     let mut p = pending.lock().unwrap();
-                    let dead: Vec<DeviceId> =
-                        p.iter().filter(|(_, v)| v.created.elapsed() >= Duration::from_secs(35)).map(|(id, _)| *id).collect();
+                    let dead: Vec<DeviceId> = p
+                        .iter()
+                        .filter(|(_, v)| v.created.elapsed() >= Duration::from_secs(35))
+                        .map(|(id, _)| *id)
+                        .collect();
                     for id in &dead {
                         p.remove(id);
                     }
                     dead
                 };
                 for id in expired {
-                    bus2.publish(Event::PairingComplete { id, success: false, error: Some("pairing request timed out".into()) });
+                    bus2.publish(Event::PairingComplete {
+                        id,
+                        success: false,
+                        error: Some("pairing request timed out".into()),
+                    });
                 }
             })
             .ok();
@@ -80,7 +94,10 @@ impl PairingManager {
 
     fn ask(&self, id: DeviceId, method: PairingMethod, passkey: Option<u32>, mitm: bool) {
         let request = PairingRequest { device: id, method, passkey };
-        self.pending.lock().unwrap().insert(id, PendingPairing { request: request.clone(), created: Instant::now(), mitm });
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(id, PendingPairing { request: request.clone(), created: Instant::now(), mitm });
         self.bus.publish(Event::PairingRequested { request });
     }
 
@@ -117,7 +134,12 @@ impl PairingManager {
                     *dst = *src;
                 }
                 let key_type = ev.u8(22);
-                let name = self.devices.lock().unwrap().get(&id).and_then(|d| d.properties.alias.clone().or_else(|| d.properties.name.clone()));
+                let name = self
+                    .devices
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .and_then(|d| d.properties.alias.clone().or_else(|| d.properties.name.clone()));
                 self.bonds.upsert_classic(&id, &key, key_type, name);
                 if let Some(d) = self.devices.lock().unwrap().get_mut(&id) {
                     d.paired = true;
@@ -151,7 +173,8 @@ impl PairingManager {
                 let addr = ev.addr(0);
                 let id = bredr(addr);
                 let value = ev.u32(6);
-                let (_, remote_auth) = self.remote.lock().unwrap().get(&id).copied().unwrap_or((IO_NO_INPUT_NO_OUTPUT, 0));
+                let (_, remote_auth) =
+                    self.remote.lock().unwrap().get(&id).copied().unwrap_or((IO_NO_INPUT_NO_OUTPUT, 0));
                 let remote_wants_mitm = remote_auth & 0x01 != 0;
                 // We never require MITM ourselves, so the numbers need checking by the user only when the peer
                 // demands MITM protection and we are able to display/compare (Just Works otherwise).
@@ -167,7 +190,11 @@ impl PairingManager {
             }
             ev::USER_PASSKEY_NOTIFICATION => {
                 // We display this passkey; the user types it on the remote keyboard.
-                let request = PairingRequest { device: bredr(ev.addr(0)), method: PairingMethod::JustWorks, passkey: Some(ev.u32(6)) };
+                let request = PairingRequest {
+                    device: bredr(ev.addr(0)),
+                    method: PairingMethod::JustWorks,
+                    passkey: Some(ev.u32(6)),
+                };
                 self.bus.publish(Event::PairingRequested { request });
             }
             ev::SIMPLE_PAIRING_COMPLETE => {
@@ -206,7 +233,8 @@ impl PairingManager {
 
     pub fn confirm(&self, device: &DeviceId, accept: bool) -> Result<()> {
         self.pending.lock().unwrap().remove(device);
-        let reply_op = if accept { op::USER_CONFIRMATION_REQUEST_REPLY } else { op::USER_CONFIRMATION_REQUEST_NEG_REPLY };
+        let reply_op =
+            if accept { op::USER_CONFIRMATION_REQUEST_REPLY } else { op::USER_CONFIRMATION_REQUEST_NEG_REPLY };
         self.hci.command(reply_op, &device.address.0)?;
         Ok(())
     }
@@ -259,7 +287,9 @@ impl PairingManager {
         let done = waiter.wait(timeout)?;
         match done.u8(0) {
             0 => Ok(()),
-            0x06 => Err(Error::PairingFailed("the device no longer has our pairing (pin or key missing): remove it and pair again".into())),
+            0x06 => Err(Error::PairingFailed(
+                "the device no longer has our pairing (pin or key missing): remove it and pair again".into(),
+            )),
             s => Err(Error::PairingFailed(format!("authentication failed: {}", hci_status_text(s)))),
         }
     }

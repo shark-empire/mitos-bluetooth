@@ -35,8 +35,7 @@ fn set_name_and_discoverable_write_controller() {
     mgr.set_name(0, "mitos-box").unwrap();
     mgr.set_discoverable(0, true).unwrap();
     let sent = shared.lock().unwrap().sent_commands();
-    assert!(sent.iter().any(|c| c[1..3] == op::WRITE_LOCAL_NAME.to_le_bytes()
-        && c[4..13] == *b"mitos-box"));
+    assert!(sent.iter().any(|c| c[1..3] == op::WRITE_LOCAL_NAME.to_le_bytes() && c[4..13] == *b"mitos-box"));
     assert!(sent.iter().any(|c| c[1..3] == op::WRITE_SCAN_ENABLE.to_le_bytes() && c[4] == 0x03));
     // persisted
     assert_eq!(mgr.store.load_config().name, "mitos-box");
